@@ -35,8 +35,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private Texture pebbleTexture;
     private Texture fogOfWarTexture;
     private Texture wumpusDeadTexture;
-    private Texture lanceTexture;   // NEW
-    private Texture impactTexture;  // NEW
+    private Texture lanceTexture;   
+    private Texture impactTexture;  
     
     // GAME STATE VARIABLES
     private BitmapFont font;
@@ -56,15 +56,15 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private boolean isShootingMode = false;
     private boolean isWumpusAlive = true;
     
-    private boolean isLanceAnimating = false;      // NEW: Animation flag
-    private float lanceAnimTimer = 0.0f;           // NEW: Timer for animation
-    private final float LANCE_ANIM_DURATION = 0.2f; // NEW: Duration (shorter for snappier feel)
-    private int lanceStartX, lanceStartY;          // NEW: Starting tile coordinates (in grid)
-    private int lanceEndX, lanceEndY;              // NEW: Ending tile coordinates (in grid)
-    private float lanceRotation = 0f;              // NEW: Rotation for the lance sprite
-    private boolean showImpact = false;            // NEW: Show impact graphic briefly
-    private float impactTimer = 0.0f;              // NEW: Timer for impact display
-    private final float IMPACT_DURATION = 0.1f;    // NEW: Duration for impact graphic
+    private boolean isLanceAnimating = false;      
+    private float lanceAnimTimer = 0.0f;           
+    private final float LANCE_ANIM_DURATION = 0.2f; 
+    private int lanceStartX, lanceStartY;          
+    private int lanceEndX, lanceEndY;              
+    private float lanceRotation = 0f;              
+    private boolean showImpact = false;            
+    private float impactTimer = 0.0f;              
+    private final float IMPACT_DURATION = 0.1f;    
 
     
     // MENU SPECIFIC VARIABLES
@@ -94,8 +94,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         pebbleTexture = new Texture("pebble_brown0.png"); 
         fogOfWarTexture = new Texture("FogofWarSingle.png"); 
         wumpusDeadTexture = new Texture("brown_ooze.png"); 
-        lanceTexture = new Texture("javelin2.png");   // NEW: Load Lance texture
-        impactTexture = new Texture("bolt06.png");    // NEW: Load Impact texture
+        lanceTexture = new Texture("javelin2.png");   
+        impactTexture = new Texture("bolt06.png");    
         font = new BitmapFont(); 
         font.getData().setScale(1.0f); 
         
@@ -121,15 +121,15 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         obstacles = new ArrayList<>();
         treasure = new ArrayList<>();
         proximityMessages = new ArrayList<>();
-        gameOverMessage = "";
+        gameOverMessage = ""; // Reset game over message
         currentState = STATE_GAMEPLAY;
         
         // RESET LANCE AND WUMPUS STATE
         hasLance = true; 
         isShootingMode = false; 
         isWumpusAlive = true; 
-        isLanceAnimating = false; // NEW: Reset animation state
-        showImpact = false;       // NEW: Reset impact state
+        isLanceAnimating = false; 
+        showImpact = false;       
         
         player = new Player("donald.png", 0, 0); 
         
@@ -457,31 +457,43 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         
         // 3. PAUSE MENU Option Clicks (Only active when paused)
         if (currentState == STATE_PAUSED) {
-            // New Game
-            float newGameY = menuCenterY + MENU_START_Y_OFFSET;
+            boolean isGameOver = !gameOverMessage.isEmpty();
+
+            // Resume Game (NEW)
+            float resumeGameY = menuCenterY + MENU_START_Y_OFFSET;
+            if (!isGameOver && worldX > optionX && worldX < optionX + optionWidth && worldY > resumeGameY - 20 && worldY < resumeGameY + 5) {
+                currentState = STATE_GAMEPLAY;
+                return true;
+            }
+
+            // New Game (Shifted)
+            float newGameY = menuCenterY + MENU_START_Y_OFFSET - 30;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > newGameY - 20 && worldY < newGameY + 5) {
                 startGame();
                 return true;
             }
 
-            // Save Game
-            float saveGameY = menuCenterY + MENU_START_Y_OFFSET - 30;
+            // Save Game (Shifted)
+            float saveGameY = menuCenterY + MENU_START_Y_OFFSET - 60;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > saveGameY - 20 && worldY < saveGameY + 5) {
-                currentState = STATE_GAMEPLAY; // Close menu after 'saving'
-                Gdx.app.log("WUMPUS_GAME", "Save Game (Not fully implemented)");
+                // If game is over, prevent saving
+                if (!isGameOver) { 
+                    currentState = STATE_GAMEPLAY; // Close menu after 'saving'
+                    Gdx.app.log("WUMPUS_GAME", "Save Game (Not fully implemented)");
+                }
                 return true;
             }
             
-            // Load Game
-            float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 60;
+            // Load Game (Shifted)
+            float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 90;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > loadGameY - 20 && worldY < loadGameY + 5) {
                 currentState = STATE_GAMEPLAY; // Close menu after 'loading'
                 Gdx.app.log("WUMPUS_GAME", "Load Game (Not fully implemented)");
                 return true;
             }
             
-            // Quit to Menu (Return to Main Menu state)
-            float quitY = menuCenterY + MENU_START_Y_OFFSET - 90;
+            // Quit to Menu (Shifted)
+            float quitY = menuCenterY + MENU_START_Y_OFFSET - 120;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > quitY - 20 && worldY < quitY + 5) {
                 currentState = STATE_MAIN_MENU;
                 Gdx.app.log("WUMPUS_GAME", "Quit to Main Menu");
@@ -745,16 +757,44 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 font.draw(batch, "                                                                                                                                                                                                                                               ", viewX, viewY);
                 font.getData().setScale(1f);
 
-                font.setColor(Color.WHITE);
                 float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
                 float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
+                boolean isGameOverFinal = !gameOverMessage.isEmpty(); // Check if game is over
 
+                font.setColor(Color.WHITE);
                 font.draw(batch, "PAUSED", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET + 30);
                 
-                font.draw(batch, "New Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET);
-                font.draw(batch, "Save Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 30);
-                font.draw(batch, "Load Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 60);
-                font.draw(batch, "Quit to Menu", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 90);
+                // NEW: Resume Game (Top item)
+                float resumeGameY = menuCenterY + MENU_START_Y_OFFSET;
+                if (isGameOverFinal) {
+                    font.setColor(Color.GRAY);
+                } else {
+                    font.setColor(Color.WHITE);
+                }
+                font.draw(batch, "Resume", menuCenterX - 50, resumeGameY);
+                
+                // New Game (Shifted)
+                float newGameY = menuCenterY + MENU_START_Y_OFFSET - 30;
+                font.setColor(Color.WHITE); // Always white
+                font.draw(batch, "New Game", menuCenterX - 50, newGameY);
+                
+                // Save Game (Shifted, Grayed out on Game Over)
+                float saveGameY = menuCenterY + MENU_START_Y_OFFSET - 60;
+                if (isGameOverFinal) {
+                    font.setColor(Color.GRAY);
+                } else {
+                    font.setColor(Color.WHITE);
+                }
+                font.draw(batch, "Save Game", menuCenterX - 50, saveGameY);
+                
+                // Load Game (Shifted)
+                float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 90;
+                font.setColor(Color.WHITE); 
+                font.draw(batch, "Load Game", menuCenterX - 50, loadGameY);
+                
+                // Quit to Menu (Shifted)
+                float quitY = menuCenterY + MENU_START_Y_OFFSET - 120;
+                font.draw(batch, "Quit to Menu", menuCenterX - 50, quitY);
             }
         }
 
@@ -767,8 +807,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         font.dispose();
         fogOfWarTexture.dispose();
         wumpusDeadTexture.dispose(); 
-        lanceTexture.dispose(); // DISPOSE LANCE TEXTURE
-        impactTexture.dispose(); // DISPOSE IMPACT TEXTURE
+        lanceTexture.dispose(); 
+        impactTexture.dispose(); 
         
         // Dispose textures for all static entities (only if they were initialized)
         if (traps != null) for (StaticEntity entity : traps) entity.dispose();
