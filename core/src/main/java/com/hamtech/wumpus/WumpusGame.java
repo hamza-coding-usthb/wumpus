@@ -23,7 +23,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private Player player;
     private Wumpus wumpus;
     
-    // New entity lists
+    // Entity lists
     private List<StaticEntity> traps;
     private List<StaticEntity> obstacles;
     private List<StaticEntity> treasure;
@@ -32,18 +32,24 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private OrthographicCamera camera;
     private Viewport viewport;
     private Texture pebbleTexture;
-    private Texture fogOfWarTexture; // NEW FIELD for Fog of War
+    private Texture fogOfWarTexture;
     
     // GAME STATE VARIABLES
     private BitmapFont font;
-    private boolean isGameOver = false;
     private String gameOverMessage = "";
     private List<String> proximityMessages;
-    private boolean[][] isVisible; // NEW FIELD: Tracks explored tiles
+    private boolean[][] isVisible;
     
-    // MENU STATE VARIABLES
-    private boolean isPaused = false;
-    private Rectangle menuButtonBounds;
+    // APPLICATION FLOW STATES
+    private final int STATE_MAIN_MENU = 0;
+    private final int STATE_GAMEPLAY = 1;
+    private final int STATE_PAUSED = 2;
+    private final int STATE_GAME_OVER = 3;
+    private int currentState = STATE_MAIN_MENU; // Starts on Main Menu
+    
+    // MENU SPECIFIC VARIABLES
+    private int menuSelection = 0; // 0: New Game, 1: Load Game, 2: Quit
+    private Rectangle menuButtonBounds; // <-- CORRECTED: FIELD DECLARATION RE-ADDED
     
     // UI Constants
     private final float MENU_BUTTON_WIDTH = 70;
@@ -64,99 +70,44 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         camera.position.set(viewport.getWorldWidth() / 2f, viewport.getWorldHeight() / 2f, 0);
         camera.update();
 
+        // Load non-game-specific textures/fonts
         pebbleTexture = new Texture("pebble_brown0.png"); 
-        fogOfWarTexture = new Texture("FogofWarSingle.png"); // INITIALIZE FOG TEXTURE
-        player = new Player("donald.png", 0, 0);
-        
-        // Initialize Font and Messages
+        fogOfWarTexture = new Texture("FogofWarSingle.png"); 
         font = new BitmapFont(); 
         font.getData().setScale(1.0f); 
-        proximityMessages = new ArrayList<>();
         
-        // Initialize FoW and set starting tile visible
-        isVisible = new boolean[GRID_SIZE][GRID_SIZE];
-        isVisible[player.getGridX()][player.getGridY()] = true;
-
-
-        // Initialize Menu Button Bounds (based on viewport size)
+        // Initialize menu button bounds
         float menuX = viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
         float menuY = viewport.getWorldHeight() - MENU_BUTTON_HEIGHT - 10;
         menuButtonBounds = new Rectangle(menuX, menuY, MENU_BUTTON_WIDTH, MENU_BUTTON_HEIGHT);
 
+        Gdx.input.setInputProcessor(this);
+    }
+    
+    /** Initializes all game entities and resets state for a new game. */
+    private void startGame() {
+        // Dispose of existing entities if they exist
+        if (player != null) player.dispose();
+        if (wumpus != null) wumpus.dispose();
+        if (traps != null) for (StaticEntity entity : traps) entity.dispose();
+        if (obstacles != null) for (StaticEntity entity : obstacles) entity.dispose();
+        if (treasure != null) for (StaticEntity entity : treasure) entity.dispose();
 
-        // Lists initialization
+        // Reset lists and state
         traps = new ArrayList<>();
         obstacles = new ArrayList<>();
         treasure = new ArrayList<>();
-        
-        Random random = new Random();
-        
-        // List to track all occupied coordinates on the grid
-        List<GridPoint2> occupiedPositions = new ArrayList<>();
-        
-        // 1. Mark the illegal 2x2 area around the player (0,0) as occupied
-        occupiedPositions.add(new GridPoint2(0, 0)); // Player's position
-        occupiedPositions.add(new GridPoint2(1, 0));
-        occupiedPositions.add(new GridPoint2(0, 1));
-        occupiedPositions.add(new GridPoint2(1, 1));
-        
-        // Helper method to find a valid, unoccupied position
-        GridPoint2 pos;
-        
-        // 2. Place Wumpus (sphinx.png)
-        pos = findValidPosition(random, occupiedPositions);
-        wumpus = new Wumpus("sphinx.png", pos.x, pos.y);
-        occupiedPositions.add(pos);
-        
-        // 3. Place 2 Traps (dngn_trap_arrow.png)
-        for (int i = 0; i < 2; i++) {
-            pos = findValidPosition(random, occupiedPositions);
-            traps.add(new StaticEntity("dngn_trap_arrow.png", pos.x, pos.y));
-            occupiedPositions.add(pos);
-        }
-        
-        // 4. Place 2 Obstacles (crumbled_column.png)
-        for (int i = 0; i < 2; i++) {
-            pos = findValidPosition(random, occupiedPositions);
-            obstacles.add(new StaticEntity("crumbled_column.png", pos.x, pos.y));
-            occupiedPositions.add(pos);
-        }
-        
-        // 5. Place 1 Treasure (gold_pile.png)
-        pos = findValidPosition(random, occupiedPositions);
-        treasure.add(new StaticEntity("gold_pile.png", pos.x, pos.y));
-        occupiedPositions.add(pos);
-        
-        Gdx.input.setInputProcessor(this);
-        
-        // Initial proximity check (for starting tile 0,0)
-        checkGameInteraction();
-    }
-    
-    // Method to reset the game state for "New Game"
-    private void newGame() {
-        isPaused = false;
-        isGameOver = false;
+        proximityMessages = new ArrayList<>();
         gameOverMessage = "";
+        currentState = STATE_GAMEPLAY;
         
-        // Dispose of existing entities
-        wumpus.dispose();
-        for (StaticEntity entity : traps) entity.dispose();
-        for (StaticEntity entity : obstacles) entity.dispose();
-        for (StaticEntity entity : treasure) entity.dispose();
-
-        // Re-run setup logic from create
-        traps.clear();
-        obstacles.clear();
-        treasure.clear();
+        player = new Player("donald.png", 0, 0); 
         
-        player = new Player("donald.png", 0, 0); // Recreate player at (0,0)
-        
-        // Re-initialize FoW
+        // Initialize FoW and set starting tile visible
         isVisible = new boolean[GRID_SIZE][GRID_SIZE];
         isVisible[player.getGridX()][player.getGridY()] = true;
         
-        // Entity placement logic (copied from create for re-initialization)
+        // Entity placement logic
         Random random = new Random();
         List<GridPoint2> occupiedPositions = new ArrayList<>();
         
@@ -166,6 +117,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         occupiedPositions.add(new GridPoint2(1, 1));
         
         GridPoint2 pos;
+        
         pos = findValidPosition(random, occupiedPositions);
         wumpus = new Wumpus("sphinx.png", pos.x, pos.y);
         occupiedPositions.add(pos);
@@ -188,7 +140,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         
         centerCameraOnPlayer();
         checkGameInteraction(); // Check initial proximity
-        Gdx.app.log("WUMPUS_GAME", "New Game Started.");
+        Gdx.app.log("WUMPUS_GAME", "Game Started.");
     }
     
     /** Finds a random, valid position that is not in the occupiedPositions list. */
@@ -239,14 +191,27 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
     @Override
     public boolean keyDown(int keycode) {
-        // Halt input if the game is over OR paused
-        if (isGameOver || isPaused) {
+        // Main Menu Navigation
+        if (currentState == STATE_MAIN_MENU) {
+            if (keycode == Keys.UP) {
+                menuSelection = (menuSelection - 1 + 3) % 3; // Cycle 0-2 (New, Load, Quit)
+                return true;
+            } else if (keycode == Keys.DOWN) {
+                menuSelection = (menuSelection + 1) % 3; // Cycle 0-2
+                return true;
+            } else if (keycode == Keys.ENTER) {
+                handleMainMenuSelection();
+                return true;
+            }
+        }
+        
+        // Block movement if paused or game over
+        if (currentState != STATE_GAMEPLAY) {
             return false;
         }
         
+        // In-game movement logic
         int dx = 0, dy = 0;
-
-        // 1. Determine intended movement vector (dx, dy)
         if (keycode == Keys.LEFT) {
             dx = -1;
         } else if (keycode == Keys.RIGHT) {
@@ -257,78 +222,107 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             dy = -1;
         }
         
-        // Only proceed if a directional key was pressed
         if (dx != 0 || dy != 0) {
-            
-            // Calculate potential new position
             int newX = player.getGridX() + dx;
             int newY = player.getGridY() + dy;
 
-            // 2. CHECK: If the target tile has an obstacle, DO NOT MOVE.
             if (isTileOccupiedByObstacle(newX, newY)) {
                 return true; 
             }
             
-            // 3. If no obstacle, move the player (player.move handles boundary checks)
             player.move(dx, dy);
 
-            // FOG OF WAR: Mark new tile as visible
             isVisible[player.getGridX()][player.getGridY()] = true;
 
             centerCameraOnPlayer();
-            
-            // CHECK FOR INTERACTIONS (Collision and Proximity) AFTER MOVING
             checkGameInteraction();
         }
 
         return true;
     }
 
+    private void handleMainMenuSelection() {
+        if (menuSelection == 0) { // New Game
+            startGame();
+        } else if (menuSelection == 1) { // Load Game
+            // Placeholder: Switch state to gameplay for testing if load was successful
+            Gdx.app.log("WUMPUS_GAME", "Load Game (Not implemented)");
+        } else if (menuSelection == 2) { // Quit
+            Gdx.app.exit();
+        }
+    }
+
+
     @Override
     public boolean touchDown(int screenX, int screenY, int pointer, int button) {
-        // Unproject screen coordinates to world coordinates (essential for UI overlay)
+        // Unproject screen coordinates to world coordinates
         float worldX = camera.position.x - viewport.getWorldWidth() / 2f + screenX;
         float worldY = camera.position.y + viewport.getWorldHeight() / 2f - screenY;
 
-        // 1. Menu Button Logic (Always active unless game is over)
-        if (!isGameOver) {
-            // Recalculate button bounds relative to current camera position
-            float viewX = camera.position.x - viewport.getWorldWidth() / 2f;
-            float viewY = camera.position.y + viewport.getWorldHeight() / 2f;
+        // Base coordinates for UI elements relative to the viewport
+        float viewX = camera.position.x - viewport.getWorldWidth() / 2f;
+        float viewY = camera.position.y + viewport.getWorldHeight() / 2f;
+        float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
+        float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
+        float optionX = menuCenterX - 50; 
+        float optionWidth = 200; 
+
+        // 1. MAIN MENU Clicks
+        if (currentState == STATE_MAIN_MENU) {
+            // New Game
+            float newGameY = menuCenterY + MENU_START_Y_OFFSET - 80;
+            if (worldX > optionX && worldX < optionX + optionWidth && worldY > newGameY - 20 && worldY < newGameY + 5) {
+                menuSelection = 0;
+                handleMainMenuSelection();
+                return true;
+            }
+
+            // Load Game
+            float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 110;
+            if (worldX > optionX && worldX < optionX + optionWidth && worldY > loadGameY - 20 && worldY < loadGameY + 5) {
+                menuSelection = 1;
+                handleMainMenuSelection();
+                return true;
+            }
             
+            // Quit
+            float quitY = menuCenterY + MENU_START_Y_OFFSET - 140;
+            if (worldX > optionX && worldX < optionX + optionWidth && worldY > quitY - 20 && worldY < quitY + 5) {
+                menuSelection = 2;
+                handleMainMenuSelection();
+                return true;
+            }
+            return false;
+        }
+
+
+        // 2. PAUSE/MENU Button Logic (Active during gameplay or game over)
+        if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { // <-- MODIFIED CONDITION
+            // Check [MENU] button click area
             float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
             float btnY = viewY - MENU_BUTTON_HEIGHT - 10;
             Rectangle currentMenuButtonBounds = new Rectangle(btnX, btnY, MENU_BUTTON_WIDTH, MENU_BUTTON_HEIGHT);
             
             if (currentMenuButtonBounds.contains(worldX, worldY)) {
-                isPaused = !isPaused;
-                Gdx.app.log("WUMPUS_GAME", "Menu Toggled: " + (isPaused ? "Paused" : "Playing"));
+                currentState = STATE_PAUSED;
+                Gdx.app.log("WUMPUS_GAME", "Menu Toggled: Paused");
                 return true;
             }
         }
         
-        // 2. Menu Option Clicks (Only active when paused)
-        if (isPaused) {
-            float viewX = camera.position.x - viewport.getWorldWidth() / 2f;
-            float viewY = camera.position.y + viewport.getWorldHeight() / 2f;
-            
-            float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
-            float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
-
-            float optionX = menuCenterX - 50; // Text is centered roughly here
-            float optionWidth = 200; // Large enough click area
-
+        // 3. PAUSE MENU Option Clicks (Only active when paused)
+        if (currentState == STATE_PAUSED) {
             // New Game
             float newGameY = menuCenterY + MENU_START_Y_OFFSET;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > newGameY - 20 && worldY < newGameY + 5) {
-                newGame();
+                startGame();
                 return true;
             }
 
             // Save Game
             float saveGameY = menuCenterY + MENU_START_Y_OFFSET - 30;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > saveGameY - 20 && worldY < saveGameY + 5) {
-                isPaused = false;
+                currentState = STATE_GAMEPLAY; // Close menu after 'saving'
                 Gdx.app.log("WUMPUS_GAME", "Save Game (Not fully implemented)");
                 return true;
             }
@@ -336,16 +330,16 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             // Load Game
             float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 60;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > loadGameY - 20 && worldY < loadGameY + 5) {
-                isPaused = false;
+                currentState = STATE_GAMEPLAY; // Close menu after 'loading'
                 Gdx.app.log("WUMPUS_GAME", "Load Game (Not fully implemented)");
                 return true;
             }
             
-            // Quit to Menu (Exit Application for now)
+            // Quit to Menu (Return to Main Menu state)
             float quitY = menuCenterY + MENU_START_Y_OFFSET - 90;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > quitY - 20 && worldY < quitY + 5) {
-                Gdx.app.log("WUMPUS_GAME", "Quitting Game...");
-                Gdx.app.exit();
+                currentState = STATE_MAIN_MENU;
+                Gdx.app.log("WUMPUS_GAME", "Quit to Main Menu");
                 return true;
             }
         }
@@ -353,56 +347,44 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     }
     
     private void checkGameInteraction() {
-        // Clear previous proximity messages at the start of the turn
         proximityMessages.clear();
         
-        if (isGameOver) return;
+        if (currentState == STATE_GAME_OVER) return;
         
         int playerX = player.getGridX();
         int playerY = player.getGridY();
 
         // --- CHECK FOR IMMEDIATE COLLISIONS (Game Over/Win) ---
         
-        // 1. Check for Treasure (Win Condition)
         StaticEntity gold = treasure.get(0);
         if (playerX == gold.getGridX() && playerY == gold.getGridY()) {
-            isGameOver = true;
+            currentState = STATE_GAME_OVER;
             gameOverMessage = "YOU FOUND THE TREASURE! YOU WIN! 🎉";
-            Gdx.app.log("WUMPUS_GAME", "--- VICTORY ---");
             return;
         }
         
-        // 2. Check for Traps (Lose Condition)
         for (StaticEntity trap : traps) {
             if (playerX == trap.getGridX() && playerY == trap.getGridY()) {
-                isGameOver = true;
+                currentState = STATE_GAME_OVER;
                 gameOverMessage = "BOOM! You stepped on a trap. Game Over! 💀";
-                Gdx.app.log("WUMPUS_GAME", "--- DEFEAT (TRAP) ---");
                 return;
             }
         }
 
-        // 3. Check for Wumpus (Lose Condition)
         if (playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
-            isGameOver = true;
+            currentState = STATE_GAME_OVER;
             gameOverMessage = "A ROAR! The Wumpus devoured you! Game Over! 😵";
-            Gdx.app.log("WUMPUS_GAME", "--- DEFEAT (WUMPUS) ---");
             return;
         }
 
-        // --- CHECK FOR PROXIMITY EFFECTS (Only runs if game is NOT over) ---
+        // --- CHECK FOR PROXIMITY EFFECTS ---
         
-        // Treasure Proximity: "A glow is visible"
         if (isAdjacent(playerX, playerY, gold.getGridX(), gold.getGridY())) {
             proximityMessages.add("A glow is visible");
         }
-
-        // Wumpus Proximity: "You can smell a stench"
         if (isAdjacent(playerX, playerY, wumpus.getGridX(), wumpus.getGridY())) {
             proximityMessages.add("You can smell a stench");
         }
-        
-        // Traps Proximity: "You feel a breeze"
         for (StaticEntity trap : traps) {
             if (isAdjacent(playerX, playerY, trap.getGridX(), trap.getGridY())) {
                 proximityMessages.add("You feel a breeze");
@@ -411,6 +393,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     }
 
     private void centerCameraOnPlayer() {
+        if (player == null) return;
+        
         float targetX = player.getGridX() * TILE_SIZE + (TILE_SIZE / 2f);
         float targetY = player.getGridY() * TILE_SIZE + (TILE_SIZE / 2f);
         float cameraHalfWidth = viewport.getWorldWidth() / 2f;
@@ -442,110 +426,133 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         batch.setProjectionMatrix(camera.combined);
         batch.begin();
 
-        // 1. Draw Grid and Entities
-        for (int x = 0; x < GRID_SIZE; x++) {
-            for (int y = 0; y < GRID_SIZE; y++) {
-                float xPos = x * TILE_SIZE;
-                float yPos = y * TILE_SIZE;
-                
-                // Draw only visible parts
-                if (isGameOver || isVisible[x][y]) {
-                    // Draw Tile
-                    batch.draw(pebbleTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
-                    
-                    // Draw Entities on visible tile
-                    if (x == wumpus.getGridX() && y == wumpus.getGridY()) wumpus.draw(batch, TILE_SIZE);
-                    for (StaticEntity entity : treasure) {
-                        if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
-                    }
-                    for (StaticEntity entity : traps) {
-                        if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
-                    }
-                    for (StaticEntity entity : obstacles) {
-                        if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
-                    }
-                } else {
-                    // If not visible, draw only the basic tile (optional, but ensures background color is not showing)
-                    batch.draw(pebbleTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
-                }
-            }
-        }
-        
-        // 4. Draw Player (on top of everything else)
-        player.draw(batch, TILE_SIZE);
-
-        // --- FOG OF WAR DRAWING ---
-        if (!isGameOver) {
-            for (int x = 0; x < GRID_SIZE; x++) {
-                for (int y = 0; y < GRID_SIZE; y++) {
-                    // Draw FoW if the tile is NOT visible
-                    if (!isVisible[x][y]) {
-                        float xPos = x * TILE_SIZE;
-                        float yPos = y * TILE_SIZE;
-                        batch.draw(fogOfWarTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
-                    }
-                }
-            }
-        }
-
-        // --- UI DRAWING ---
-
         // Calculate coordinates relative to the screen view
         float viewX = camera.position.x - viewport.getWorldWidth() / 2f;
         float viewY = camera.position.y + viewport.getWorldHeight() / 2f;
 
-        // Draw Menu Button (Upper Right)
-        if (!isGameOver && !isPaused) {
+
+        // --- STATE: MAIN MENU ---
+        if (currentState == STATE_MAIN_MENU) {
             font.setColor(Color.WHITE);
-            float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
-            float btnY = viewY - 10;
-            font.draw(batch, "[MENU]", btnX, btnY);
-        }
-        
-        // Draw Proximity Messages (Top Left, only if game is NOT over or paused)
-        if (!isGameOver && !isPaused && !proximityMessages.isEmpty()) {
-            
-            float messageY = viewY - 10; 
-            
-            font.setColor(0.5f, 1.0f, 0.5f, 1.0f); // Light green for effects
-            
-            for (String message : proximityMessages) {
-                font.draw(batch, message, viewX + 10, messageY); 
-                messageY -= 20;
-            }
-        }
-
-        // Draw Game Over Message
-        if (isGameOver) {
-            if (gameOverMessage.contains("WIN")) {
-                font.setColor(1.0f, 1.0f, 0.0f, 1.0f); // Gold/Yellow for win
-            } else {
-                font.setColor(1.0f, 0.0f, 0.0f, 1.0f); // Red for lose
-            }
-
-            font.draw(batch, gameOverMessage, viewX + 50, viewY - 50); 
-        } 
-        
-        // Draw PAUSE MENU Overlay
-        if (isPaused) {
-            // Draw a semi-transparent black overlay (simulated with text for simplicity)
-            font.setColor(0f, 0f, 0f, 0.7f);
-            font.getData().setScale(2f);
-            font.draw(batch, "                                                                                                                                                                                                                                               ", viewX, viewY);
-            font.getData().setScale(1f);
-
-            font.setColor(Color.WHITE);
-
             float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
             float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
 
-            font.draw(batch, "PAUSED", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET + 30);
+            // WUMPUS Title
+            font.getData().setScale(3f);
+            font.draw(batch, "WUMPUS", menuCenterX - 120, menuCenterY + 180);
+            font.getData().setScale(1.5f);
             
-            // Menu Options (clickable text)
-            font.draw(batch, "New Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET);
-            font.draw(batch, "Save Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 30);
-            font.draw(batch, "Load Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 60);
-            font.draw(batch, "Quit to Menu", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 90);
+            // Menu Options
+            String[] options = {"New Game", "Load Game", "Quit"};
+            for(int i = 0; i < options.length; i++) {
+                if (menuSelection == i) {
+                    font.setColor(Color.YELLOW); // Highlight effect
+                } else {
+                    font.setColor(Color.WHITE);
+                }
+                
+                // Quit is index 2, Load is 1, New is 0. Draw order: New, Load, Quit (descending Y)
+                float optionY = menuCenterY + MENU_START_Y_OFFSET - 80 - (i * 30);
+                font.draw(batch, options[i], menuCenterX - 50, optionY);
+            }
+            
+            font.getData().setScale(1f); // Reset font scale
+        } 
+        
+        // --- STATE: GAMEPLAY, PAUSED, GAME OVER ---
+        else {
+            boolean isGameOver = (currentState == STATE_GAME_OVER);
+            
+            // 1. Draw Grid and Entities (Only visible tiles or entire map if game over)
+            for (int x = 0; x < GRID_SIZE; x++) {
+                for (int y = 0; y < GRID_SIZE; y++) {
+                    float xPos = x * TILE_SIZE;
+                    float yPos = y * TILE_SIZE;
+                    
+                    if (isGameOver || isVisible[x][y]) {
+                        batch.draw(pebbleTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
+                        
+                        if (wumpus != null && x == wumpus.getGridX() && y == wumpus.getGridY()) wumpus.draw(batch, TILE_SIZE);
+                        for (StaticEntity entity : treasure) {
+                            if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
+                        }
+                        for (StaticEntity entity : traps) {
+                            if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
+                        }
+                        for (StaticEntity entity : obstacles) {
+                            if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
+                        }
+                    } else {
+                        batch.draw(pebbleTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
+                    }
+                }
+            }
+            
+            // 2. Draw Player
+            player.draw(batch, TILE_SIZE);
+
+            // 3. FOG OF WAR DRAWING
+            if (!isGameOver) {
+                for (int x = 0; x < GRID_SIZE; x++) {
+                    for (int y = 0; y < GRID_SIZE; y++) {
+                        if (!isVisible[x][y]) {
+                            float xPos = x * TILE_SIZE;
+                            float yPos = y * TILE_SIZE;
+                            batch.draw(fogOfWarTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
+                        }
+                    }
+                }
+            }
+
+            // 4. UI DRAWING (HUD, Messages, Pause Menu)
+
+            // Draw Menu Button (Upper Right)
+            if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { // <-- MODIFIED CONDITION
+                font.setColor(Color.WHITE);
+                float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
+                float btnY = viewY - 10;
+                font.draw(batch, "[MENU]", btnX, btnY);
+            }
+            
+            // Draw Proximity Messages (Top Left)
+            if (currentState == STATE_GAMEPLAY && !proximityMessages.isEmpty()) {
+                float messageY = viewY - 10; 
+                font.setColor(0.5f, 1.0f, 0.5f, 1.0f); // Light green for effects
+                for (String message : proximityMessages) {
+                    font.draw(batch, message, viewX + 10, messageY); 
+                    messageY -= 20;
+                }
+            }
+
+            // Draw Game Over Message
+            if (isGameOver) {
+                if (gameOverMessage.contains("WIN")) {
+                    font.setColor(1.0f, 1.0f, 0.0f, 1.0f); // Gold/Yellow for win
+                } else {
+                    font.setColor(1.0f, 0.0f, 0.0f, 1.0f); // Red for lose
+                }
+                font.draw(batch, gameOverMessage, viewX + 50, viewY - 50); 
+            } 
+            
+            // Draw PAUSE MENU Overlay
+            if (currentState == STATE_PAUSED) {
+                // Draw a semi-transparent black overlay
+                font.setColor(0f, 0f, 0f, 0.7f);
+                font.getData().setScale(2f);
+                font.draw(batch, "                                                                                                                                                                                                                                               ", viewX, viewY);
+                font.getData().setScale(1f);
+
+                font.setColor(Color.WHITE);
+                float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
+                float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
+
+                font.draw(batch, "PAUSED", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET + 30);
+                
+                font.draw(batch, "New Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET);
+                font.draw(batch, "Save Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 30);
+                font.draw(batch, "Load Game", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 60);
+                font.draw(batch, "Quit to Menu", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET - 90);
+            }
         }
 
         batch.end();
@@ -555,21 +562,15 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     public void dispose() {
         batch.dispose();
         font.dispose();
-        fogOfWarTexture.dispose(); // DISPOSE FOG TEXTURE
+        fogOfWarTexture.dispose();
         
-        // Dispose textures for all static entities
-        for (StaticEntity entity : traps) {
-            entity.dispose();
-        }
-        for (StaticEntity entity : obstacles) {
-            entity.dispose();
-        }
-        for (StaticEntity entity : treasure) {
-            entity.dispose();
-        }
+        // Dispose textures for all static entities (only if they were initialized)
+        if (traps != null) for (StaticEntity entity : traps) entity.dispose();
+        if (obstacles != null) for (StaticEntity entity : obstacles) entity.dispose();
+        if (treasure != null) for (StaticEntity entity : treasure) entity.dispose();
         
-        player.dispose();
-        wumpus.dispose();
+        if (player != null) player.dispose();
+        if (wumpus != null) wumpus.dispose();
         pebbleTexture.dispose();
     }
 }
