@@ -15,9 +15,10 @@ import java.util.List;
 import java.util.ArrayList;
 import com.badlogic.gdx.math.GridPoint2;
 import com.badlogic.gdx.graphics.g2d.BitmapFont;
+import com.badlogic.gdx.graphics.g2d.GlyphLayout; // NEW: Added for text width measurement
 import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.math.Rectangle;
-import com.badlogic.gdx.math.MathUtils; // Added for interpolation and rotation
+import com.badlogic.gdx.math.MathUtils; 
 
 /** {@link com.badlogic.gdx.ApplicationListener} implementation shared by all platforms. */
 public class WumpusGame extends ApplicationAdapter implements InputProcessor {
@@ -40,16 +41,20 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     
     // GAME STATE VARIABLES
     private BitmapFont font;
+    private GlyphLayout layout; // NEW: Used for calculating text width
     private String gameOverMessage = "";
     private List<String> proximityMessages;
     private boolean[][] isVisible;
+    
+    private float gameTime = 0.0f; 
+
     
     // APPLICATION FLOW STATES
     private final int STATE_MAIN_MENU = 0;
     private final int STATE_GAMEPLAY = 1;
     private final int STATE_PAUSED = 2;
     private final int STATE_GAME_OVER = 3;
-    private int currentState = STATE_MAIN_MENU; // Starts on Main Menu
+    private int currentState = STATE_MAIN_MENU; 
     
     // LANCE/SHOOTING/ANIMATION VARIABLES
     private boolean hasLance = true;
@@ -68,7 +73,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
     
     // MENU SPECIFIC VARIABLES
-    private int menuSelection = 0; // 0: New Game, 1: Load Game, 2: Quit
+    private int menuSelection = 0; 
     private Rectangle menuButtonBounds; 
     
     // UI Constants
@@ -98,6 +103,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         impactTexture = new Texture("bolt06.png");    
         font = new BitmapFont(); 
         font.getData().setScale(1.0f); 
+        layout = new GlyphLayout(); // NEW: Initialize the GlyphLayout
+
         
         // Initialize menu button bounds
         float menuX = viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
@@ -121,8 +128,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         obstacles = new ArrayList<>();
         treasure = new ArrayList<>();
         proximityMessages = new ArrayList<>();
-        gameOverMessage = ""; // Reset game over message
+        gameOverMessage = ""; 
         currentState = STATE_GAMEPLAY;
+        gameTime = 0.0f; 
         
         // RESET LANCE AND WUMPUS STATE
         hasLance = true; 
@@ -253,8 +261,13 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         isShootingMode = false;
     }
     
-    /** Updates game logic, including the lance animation timer. */
+    /** Updates game logic, including the lance animation timer and game timer. */
     private void update(float delta) {
+        // Update game timer only if in active gameplay state
+        if (currentState == STATE_GAMEPLAY) {
+            gameTime += delta;
+        }
+
         if (isLanceAnimating) {
             lanceAnimTimer += delta;
             
@@ -445,7 +458,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { 
             // Check [MENU] button click area
             float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
-            float btnY = viewY - MENU_BUTTON_HEIGHT - 10;
+            float btnY = viewY - MENU_BUTTON_HEIGHT - 30; // Adjusted for timer placement
             Rectangle currentMenuButtonBounds = new Rectangle(btnX, btnY, MENU_BUTTON_WIDTH, MENU_BUTTON_HEIGHT);
             
             if (currentMenuButtonBounds.contains(worldX, worldY)) {
@@ -459,7 +472,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         if (currentState == STATE_PAUSED) {
             boolean isGameOver = !gameOverMessage.isEmpty();
 
-            // Resume Game (NEW)
+            // Resume Game (Top item)
             float resumeGameY = menuCenterY + MENU_START_Y_OFFSET;
             if (!isGameOver && worldX > optionX && worldX < optionX + optionWidth && worldY > resumeGameY - 20 && worldY < resumeGameY + 5) {
                 currentState = STATE_GAMEPLAY;
@@ -568,6 +581,15 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         
         camera.update();
     }
+    
+    /** Helper method to format time in seconds to MM:SS string. */
+    private String formatTime(float totalTimeSeconds) {
+        int totalSeconds = (int) totalTimeSeconds;
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        return String.format("%02d:%02d", minutes, seconds);
+    }
+
 
     @Override public boolean keyUp(int keycode) { return false; }
     @Override public boolean keyTyped(char character) { return false; }
@@ -721,17 +743,28 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
             // 6. UI DRAWING (HUD, Messages, Pause Menu)
 
+            // Draw Timer (Top Center)
+            font.setColor(Color.WHITE);
+            String timerDisplay = "Time: " + formatTime(gameTime);
+            
+            // FIX: Use GlyphLayout to get the width
+            layout.setText(font, timerDisplay);
+            float textWidth = layout.width;
+            
+            float timerX = viewX + (viewport.getWorldWidth() / 2f) - (textWidth / 2f);
+            font.draw(batch, timerDisplay, timerX, viewY - 10);
+
             // Draw Menu Button (Upper Right)
             if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { 
                 font.setColor(Color.WHITE);
                 float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
-                float btnY = viewY - 10;
+                float btnY = viewY - 30; // Shifted down to avoid colliding with timer
                 font.draw(batch, "[MENU]", btnX, btnY);
             }
             
             // Draw Proximity Messages (Top Left)
             if (currentState == STATE_GAMEPLAY && !proximityMessages.isEmpty()) {
-                float messageY = viewY - 10; 
+                float messageY = viewY - 30; // Shifted down to avoid colliding with timer
                 font.setColor(0.5f, 1.0f, 0.5f, 1.0f); // Light green for effects
                 for (String message : proximityMessages) {
                     font.draw(batch, message, viewX + 10, messageY); 
@@ -754,6 +787,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 // Draw a semi-transparent black overlay
                 font.setColor(0f, 0f, 0f, 0.7f);
                 font.getData().setScale(2f);
+                // Simple way to draw a full-screen semi-transparent rectangle using the font
+                // This draws a large block of invisible characters
                 font.draw(batch, "                                                                                                                                                                                                                                               ", viewX, viewY);
                 font.getData().setScale(1f);
 
@@ -764,7 +799,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 font.setColor(Color.WHITE);
                 font.draw(batch, "PAUSED", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET + 30);
                 
-                // NEW: Resume Game (Top item)
+                // Resume Game (Top item)
                 float resumeGameY = menuCenterY + MENU_START_Y_OFFSET;
                 if (isGameOverFinal) {
                     font.setColor(Color.GRAY);
