@@ -21,14 +21,14 @@ public class Player {
         int newX = gridX + dx;
         int newY = gridY + dy;
         
-        // Basic bounds check (8x8 grid)
+        // Basic bounds check (8x8 grid). Note: Collision check is handled in WumpusGame.
         if (newX >= 0 && newX < WumpusGame.GRID_SIZE &&
             newY >= 0 && newY < WumpusGame.GRID_SIZE) {
             
             this.gridX = newX;
             this.gridY = newY;
         }
-        // *Add Wumpus/Pit collision checks here later*
+        // If movement is blocked, gridX/gridY remain unchanged.
     }
 
     // Method to draw the player at their pixel position
@@ -45,7 +45,12 @@ public class Player {
         texture.dispose();
     }
     
-    // Getters for camera following logic
-    public int getGridX() { return gridX; }
-    public int getGridY() { return gridY; }
+    // Getters (Required by BotPlayer and WumpusGame)
+    public int getGridX() {
+        return gridX;
+    }
+
+    public int getGridY() {
+        return gridY;
+    }
 }

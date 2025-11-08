@@ -50,7 +50,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private BitmapFont font;
     private GlyphLayout layout;
     private String gameOverMessage = "";
-    private List<String> proximityMessages; // ERROR FIX: Will now be initialized in create()
+    private List<String> proximityMessages;
     private boolean[][] isVisible;
     
     private float gameTime = 0.0f; 
@@ -67,7 +67,19 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private final int STATE_PAUSED = 2;
     private final int STATE_GAME_OVER = 3;
     private final int STATE_LOAD_MENU = 4;
+    private final int STATE_NEW_GAME_MENU = 5; 
     private int currentState = STATE_MAIN_MENU; 
+    
+    // GAME MODE CONSTANTS
+    private final int MODE_SINGLE_PLAYER = 0;
+    private final int MODE_BOT_PLAYER = 1;
+    
+    // BOT PLAYER FIELDS
+    private BotPlayer botPlayer; // Holds the Q-Table and logic
+    private int currentMode = MODE_SINGLE_PLAYER; // Current game mode
+    private float botMoveTimer = 0.0f; // Timer to pace bot moves
+    private final float BOT_MOVE_DELAY = 0.15f; // Bot moves every 0.15 seconds (adjust for speed)
+    private int botEpisodeCounter = 0; // Number of bot restarts
     
     // LANCE/SHOOTING/ANIMATION VARIABLES
     private boolean hasLance = true;
@@ -100,6 +112,17 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     public static final float WORLD_WIDTH = GRID_SIZE * TILE_SIZE;
     public static final float WORLD_HEIGHT = GRID_SIZE * TILE_SIZE;
 
+    /** Simple class to encapsulate the result of a move/interaction for the Q-Learning algorithm. */
+    private static class InteractionResult {
+        double reward;
+        boolean isTerminal; // True if the state is Game Over (Win/Loss)
+
+        public InteractionResult(double reward, boolean isTerminal) {
+            this.reward = reward;
+            this.isTerminal = isTerminal;
+        }
+    }
+
     /** Inner class to hold the necessary data for displaying a save file in the load menu. */
     private static class SaveMetadata {
         String displayName;
@@ -130,8 +153,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         font = new BitmapFont(); 
         font.getData().setScale(1.0f); 
         layout = new GlyphLayout();
-        saveList = new ArrayList<>(); // Initialize save list
-        proximityMessages = new ArrayList<>(); // FIX: Initialize proximityMessages here
+        saveList = new ArrayList<>(); 
+        proximityMessages = new ArrayList<>(); 
 
         
         // Initialize menu button bounds
@@ -196,15 +219,20 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         traps = new ArrayList<>();
         obstacles = new ArrayList<>();
         treasure = new ArrayList<>();
-        proximityMessages.clear(); // This line now works because it's initialized in create()
+        proximityMessages.clear(); 
         gameOverMessage = ""; 
         isShootingMode = false;
         isLanceAnimating = false;
+        
+        // Disable bot mode on load
+        currentMode = MODE_SINGLE_PLAYER;
+        botPlayer = null;
         
         // Initialize FoW structure
         isVisible = new boolean[GRID_SIZE][GRID_SIZE];
 
         try {
+            // ... (file reading and parsing logic remains the same) ...
             String content = file.readString();
             String[] lines = content.split("\n");
             
@@ -401,42 +429,42 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         currentState = STATE_GAMEPLAY; 
     }
     
-    /** Initializes all game entities and resets state for a new game. */
-    private void startGame() {
-        // Dispose of existing entities if they exist
-        if (player != null) player.dispose();
-        if (wumpus != null) wumpus.dispose();
-        if (traps != null) for (StaticEntity entity : traps) entity.dispose();
-        if (obstacles != null) for (StaticEntity entity : obstacles) entity.dispose();
-        if (treasure != null) for (StaticEntity entity : treasure) entity.dispose();
+    /** Finds a random, valid position that is not in the occupiedPositions list. */
+    private GridPoint2 findValidPosition(Random random, List<GridPoint2> occupiedPositions) {
+        int x, y;
+        GridPoint2 newPos;
+        do {
+            x = random.nextInt(GRID_SIZE);
+            y = random.nextInt(GRID_SIZE);
+            newPos = new GridPoint2(x, y);
+        } while (isOccupied(newPos, occupiedPositions));
+        return newPos;
+    }
 
-        // Reset lists and state
+    /** Checks if a given position is already in the occupied list. */
+    private boolean isOccupied(GridPoint2 pos, List<GridPoint2> occupiedPositions) {
+        for (GridPoint2 occupied : occupiedPositions) {
+            if (occupied.x == pos.x && occupied.y == pos.y) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    /** Generates a completely new set of Wumpus, Traps, Obstacles, and Treasure. */
+    private void generateGridEntities() {
+        // 1. Clear existing entities
+        if (wumpus != null) wumpus.dispose();
+        
         traps = new ArrayList<>();
         obstacles = new ArrayList<>();
         treasure = new ArrayList<>();
-        // proximityMessages is already initialized in create(), just clear it
-        proximityMessages.clear(); 
-        gameOverMessage = ""; 
-        currentState = STATE_GAMEPLAY;
-        gameTime = 0.0f; 
         
-        // RESET LANCE AND WUMPUS STATE
-        hasLance = true; 
-        isShootingMode = false; 
-        isWumpusAlive = true; 
-        isLanceAnimating = false; 
-        showImpact = false;       
-        
-        player = new Player("donald.png", 0, 0); 
-        
-        // Initialize FoW and set starting tile visible
-        isVisible = new boolean[GRID_SIZE][GRID_SIZE];
-        isVisible[player.getGridX()][player.getGridY()] = true;
-        
-        // Entity placement logic
+        // 2. Entity placement logic
         Random random = new Random();
         List<GridPoint2> occupiedPositions = new ArrayList<>();
         
+        // Initial safe zone (0, 0) and neighbors
         occupiedPositions.add(new GridPoint2(0, 0));
         occupiedPositions.add(new GridPoint2(1, 0));
         occupiedPositions.add(new GridPoint2(0, 1));
@@ -463,32 +491,116 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         pos = findValidPosition(random, occupiedPositions);
         treasure.add(new StaticEntity("gold_pile.png", pos.x, pos.y));
         occupiedPositions.add(pos);
+
+        Gdx.app.log("WUMPUS_GAME", "New Grid Generated.");
+    }
+
+    /** Resets the player state for a new bot training episode on the SAME grid. 
+     * Called when the bot loses an episode.
+     */
+    private void resetBotEpisode() {
+        // 1. Reset Bot Player position to (0, 0)
+        // Move by the negative of its current position to ensure it lands at (0, 0)
+        player.move(-player.getGridX(), -player.getGridY()); 
+
+        // 2. Reset Game State
+        proximityMessages.clear(); 
+        gameOverMessage = ""; 
+        currentState = STATE_GAMEPLAY;
+        gameTime = 0.0f; // Reset timer for the episode
+        
+        // 3. Reset Items/Wumpus state (Crucial for same grid)
+        hasLance = true; 
+        isShootingMode = false; 
+        isWumpusAlive = true; // Wumpus is revived for the next episode on the same grid
+        isLanceAnimating = false; 
+        showImpact = false;       
+        
+        // 4. Reset FoW
+        isVisible = new boolean[GRID_SIZE][GRID_SIZE];
+        isVisible[player.getGridX()][player.getGridY()] = true;
+
+        // 5. Update Bot Episode Counter and Exploration Rate
+        botEpisodeCounter++;
+        botPlayer.decayExplorationRate();
         
         centerCameraOnPlayer();
         checkGameInteraction(); // Check initial proximity
-        Gdx.app.log("WUMPUS_GAME", "Game Started.");
+        
+        proximityMessages.add(String.format("Bot Episode %d started. Eps: %.4f (Grid Kept)", botEpisodeCounter, botPlayer.getExplorationRate()));
+        Gdx.app.log("WUMPUS_BOT", "Bot Episode Reset on SAME Grid.");
     }
     
-    /** Finds a random, valid position that is not in the occupiedPositions list. */
-    private GridPoint2 findValidPosition(Random random, List<GridPoint2> occupiedPositions) {
-        int x, y;
-        GridPoint2 newPos;
-        do {
-            x = random.nextInt(GRID_SIZE);
-            y = random.nextInt(GRID_SIZE);
-            newPos = new GridPoint2(x, y);
-        } while (isOccupied(newPos, occupiedPositions));
-        return newPos;
-    }
+    /** Initializes all game entities and resets state for a new game. 
+     * The logic is split to allow for bot episode restarts without new grid generation.
+     */
+    private void startGame(int mode) {
+        // Dispose of single-player entities if they exist and we are switching away
+        if (player != null && currentMode == MODE_SINGLE_PLAYER && mode != MODE_SINGLE_PLAYER) {
+             player.dispose();
+        }
 
-    /** Checks if a given position is already in the occupied list. */
-    private boolean isOccupied(GridPoint2 pos, List<GridPoint2> occupiedPositions) {
-        for (GridPoint2 occupied : occupiedPositions) {
-            if (occupied.x == pos.x && occupied.y == pos.y) {
-                return true;
+        // Determine if we need a NEW grid (i.e., not a bot episode restart/loss)
+        // A new grid is needed if:
+        // 1. We are changing modes (e.g., Bot to Single Player).
+        // 2. We are starting Single Player mode.
+        // 3. The entity lists haven't been initialized yet.
+        boolean needNewGrid = (currentMode != mode) || (mode == MODE_SINGLE_PLAYER) || (traps == null || traps.isEmpty());
+
+        // Reset state
+        proximityMessages.clear(); 
+        gameOverMessage = ""; 
+        currentState = STATE_GAMEPLAY;
+        gameTime = 0.0f; 
+        currentMode = mode; 
+        
+        // RESET LANCE AND WUMPUS STATE
+        hasLance = true; 
+        isShootingMode = false; 
+        isWumpusAlive = true; 
+        isLanceAnimating = false; 
+        showImpact = false;       
+        
+        // --- Player/Bot Instantiation ---
+        if (currentMode == MODE_SINGLE_PLAYER) {
+            player = new Player("donald.png", 0, 0); 
+            botPlayer = null;
+        } else { // MODE_BOT_PLAYER
+            // Create BotPlayer once, reuse it to preserve Q-table
+            if (botPlayer == null) {
+                botPlayer = new BotPlayer("donald.png", 0, 0);
+            }
+            player = botPlayer; 
+        }
+        
+        // --- Entity Placement/Grid Generation ---
+        if (needNewGrid) {
+            generateGridEntities();
+        } 
+        
+        // Reset player position to (0, 0)
+        player.move(-player.getGridX(), -player.getGridY());
+        
+        // Reset episode counter and display message if a NEW grid was generated for the bot
+        if (currentMode == MODE_BOT_PLAYER) {
+            if (needNewGrid) {
+                botEpisodeCounter = 1;
+                // The bot's exploration rate might be high if Q-table was newly initialized (i.e. botPlayer was null)
+                proximityMessages.add(String.format("Bot Episode %d started. Eps: %.4f (NEW Grid)", botEpisodeCounter, botPlayer.getExplorationRate()));
+            } else {
+                // User-initiated restart on the current grid (not a loss restart)
+                botEpisodeCounter = 1;
+                proximityMessages.add(String.format("Bot Episode %d started. Eps: %.4f (Current Grid)", botEpisodeCounter, botPlayer.getExplorationRate()));
             }
         }
-        return false;
+
+        // Initialize FoW and set starting tile visible
+        isVisible = new boolean[GRID_SIZE][GRID_SIZE];
+        isVisible[player.getGridX()][player.getGridY()] = true;
+
+        centerCameraOnPlayer();
+        checkGameInteraction(); // Check initial proximity
+        Gdx.app.log("WUMPUS_GAME", "Game Started in Mode: " + mode);
     }
     
     @Override
@@ -498,6 +610,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     
     // HELPER METHOD FOR OBSTACLE COLLISION
     private boolean isTileOccupiedByObstacle(int x, int y) {
+        // Bounds check is handled in botPlayerTurn/keyDown
         for (StaticEntity obstacle : obstacles) {
             if (obstacle.getGridX() == x && obstacle.getGridY() == y) {
                 return true;
@@ -515,7 +628,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         return withinOne && notSameTile;
     }
 
-    /** Resolves the outcome of the lance shot after the animation finishes. */
+    /** Resolves the outcome of the lance shot after the animation finishes. (Only for human mode for now) */
     private void resolveLanceShot(int targetX, int targetY) {
         String shotMessage = "";
         
@@ -549,11 +662,133 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         isShootingMode = false;
     }
     
+    /** * Determines the outcome of the player/bot's move for Q-Learning reward.
+     * This version runs AFTER the move has been executed.
+     */
+    private InteractionResult getInteractionResult(int playerX, int playerY) {
+        
+        // 1. Check for WIN Condition (Treasure)
+        StaticEntity gold = treasure.get(0);
+        if (playerX == gold.getGridX() && playerY == gold.getGridY()) {
+            // Set the terminal game state message
+            currentState = STATE_GAME_OVER;
+            gameOverMessage = "BOT FOUND THE TREASURE! WIN! 🎉";
+            return new InteractionResult(100.0, true); // HIGH POSITIVE REWARD
+        }
+        
+        // 2. Check for LOSS Conditions (Traps/Wumpus)
+        for (StaticEntity trap : traps) {
+            if (playerX == trap.getGridX() && playerY == trap.getGridY()) {
+                currentState = STATE_GAME_OVER;
+                gameOverMessage = "BOT STEPPED ON A TRAP. Game Over! 💀";
+                return new InteractionResult(-100.0, true); // HIGH NEGATIVE REWARD
+            }
+        }
+        
+        if (isWumpusAlive && wumpus != null && playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
+            currentState = STATE_GAME_OVER;
+            gameOverMessage = "WUMPUS DEVOURED BOT! Game Over! 😵";
+            return new InteractionResult(-100.0, true); // HIGH NEGATIVE REWARD
+        }
+        
+        // 3. Default movement penalty
+        return new InteractionResult(-1.0, false); // SMALL NEGATIVE REWARD (Movement cost)
+    }
+
+    /** Executes one turn for the bot player using Q-Learning. */
+    private void botPlayerTurn() {
+        if (botPlayer == null) return;
+        
+        // 1. Observe current state
+        int oldX = player.getGridX();
+        int oldY = player.getGridY();
+        
+        // 2. Choose action (epsilon-greedy)
+        int action = botPlayer.chooseAction();
+        int[] move = BotPlayer.actionToMovement(action);
+        int dx = move[0];
+        int dy = move[1];
+
+        // 3. Execute action
+        int targetX = oldX + dx;
+        int targetY = oldY + dy;
+        
+        InteractionResult interaction;
+        
+        // Check for boundary collision first
+        if (targetX < 0 || targetX >= GRID_SIZE || targetY < 0 || targetY >= GRID_SIZE) {
+            // Wall collision gives a medium negative reward
+            interaction = new InteractionResult(-10.0, false);
+            targetX = oldX; // The state hasn't changed
+            targetY = oldY;
+        } 
+        // Check for obstacle collision
+        else if (isTileOccupiedByObstacle(targetX, targetY)) {
+            // Obstacle collision gives a medium negative reward
+            interaction = new InteractionResult(-5.0, false); 
+            targetX = oldX; // The state hasn't changed
+            targetY = oldY;
+        } 
+        // Valid move
+        else {
+            player.move(dx, dy); // Update position
+            isVisible[player.getGridX()][player.getGridY()] = true;
+            
+            // Get reward and check for terminal state (Win/Loss)
+            interaction = getInteractionResult(player.getGridX(), player.getGridY());
+            centerCameraOnPlayer(); 
+            
+            // Overwrite proximity messages with learning status
+            proximityMessages.clear();
+            if (!interaction.isTerminal) {
+                proximityMessages.add(String.format("Ep: %d | Eps: %.4f | Move: %s", botEpisodeCounter, botPlayer.getExplorationRate(), getActionName(action)));
+            }
+        }
+        
+        // 4. Update Q-Table
+        botPlayer.updateQTable(oldX, oldY, action, interaction.reward, targetX, targetY);
+        
+        // 5. Check for terminal state and restart if necessary
+        if (interaction.isTerminal) {
+            if (gameOverMessage.contains("WIN")) {
+                // If the bot wins, training stops and the win message is displayed.
+                Gdx.app.log("BOT_TRAINING", "Bot WON in " + botEpisodeCounter + " episodes!");
+                proximityMessages.add("BOT WON! Total Episodes: " + botEpisodeCounter);
+                // currentState remains STATE_GAME_OVER
+            } else {
+                // If bot loses (Wumpus/Trap), restart immediately on the SAME grid
+                Gdx.app.log("BOT_TRAINING", "Bot LOST. Restarting episode " + botEpisodeCounter);
+                resetBotEpisode(); 
+            }
+        }
+    }
+
+    private String getActionName(int action) {
+        switch(action) {
+            case BotPlayer.ACTION_UP: return "UP";
+            case BotPlayer.ACTION_DOWN: return "DOWN";
+            case BotPlayer.ACTION_LEFT: return "LEFT";
+            case BotPlayer.ACTION_RIGHT: return "RIGHT";
+            default: return "WAIT";
+        }
+    }
+
+
     /** Updates game logic, including the lance animation timer and game timer. */
     private void update(float delta) {
         // Update game timer only if in active gameplay state
         if (currentState == STATE_GAMEPLAY) {
             gameTime += delta;
+            
+            // --- BOT PLAYER LOGIC ---
+            if (currentMode == MODE_BOT_PLAYER && !isLanceAnimating) {
+                // Throttle bot movement
+                botMoveTimer += delta;
+                if (botMoveTimer >= BOT_MOVE_DELAY) {
+                    botMoveTimer = 0.0f;
+                    botPlayerTurn();
+                }
+            }
         }
 
         if (isLanceAnimating) {
@@ -577,6 +812,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
     @Override
     public boolean keyDown(int keycode) {
+        // ... (existing navigation logic for LOAD_MENU, NEW_GAME_MENU, MAIN_MENU) ...
+        
         // --- LOAD MENU NAVIGATION ---
         if (currentState == STATE_LOAD_MENU) {
             if (keycode == Keys.UP) {
@@ -595,6 +832,20 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
         
+        // --- NEW GAME MENU NAVIGATION ---
+        if (currentState == STATE_NEW_GAME_MENU) {
+            if (keycode == Keys.UP) {
+                menuSelection = (menuSelection - 1 + 3) % 3; // Cycle 0-2 (Single, Bot, Return)
+                return true;
+            } else if (keycode == Keys.DOWN) {
+                menuSelection = (menuSelection + 1) % 3; // Cycle 0-2
+                return true;
+            } else if (keycode == Keys.ENTER) {
+                handleNewGameSelection(menuSelection);
+                return true;
+            }
+        }
+        
         // --- MAIN MENU NAVIGATION ---
         if (currentState == STATE_MAIN_MENU) {
             if (keycode == Keys.UP) {
@@ -609,8 +860,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
         
-        // --- GAMEPLAY/SHOOTING LOGIC ---
-        if (currentState == STATE_GAMEPLAY) {
+        // --- GAMEPLAY/SHOOTING LOGIC (Only for Single Player) ---
+        if (currentState == STATE_GAMEPLAY && currentMode == MODE_SINGLE_PLAYER) {
             
             // 1. SPACE BAR: TOGGLE SHOOTING MODE
             if (keycode == Keys.SPACE) {
@@ -661,12 +912,12 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
         
-        // Block movement if paused, game over, OR while animation is playing
-        if (currentState != STATE_GAMEPLAY || isLanceAnimating) {
+        // Block movement if paused, game over, OR while animation is playing, OR in BOT mode
+        if (currentState != STATE_GAMEPLAY || isLanceAnimating || currentMode == MODE_BOT_PLAYER) {
             return false;
         }
         
-        // In-game movement logic
+        // In-game movement logic (Single Player)
         int dx = 0, dy = 0;
         if (keycode == Keys.LEFT) {
             dx = -1;
@@ -682,8 +933,13 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             int newX = player.getGridX() + dx;
             int newY = player.getGridY() + dy;
 
+            // Check boundaries
+            if (newX < 0 || newX >= GRID_SIZE || newY < 0 || newY >= GRID_SIZE) {
+                return true; // Wall collision: block move
+            }
+            // Check obstacle collision
             if (isTileOccupiedByObstacle(newX, newY)) {
-                return true; 
+                return true; // Obstacle collision: block move
             }
             
             player.move(dx, dy);
@@ -699,15 +955,27 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
     private void handleMainMenuSelection() {
         if (menuSelection == 0) { // New Game
-            startGame();
+            currentState = STATE_NEW_GAME_MENU;
+            menuSelection = 0; 
         } else if (menuSelection == 1) { // Load Game
-            refreshSaveList(); // Load the list of available saves
-            currentState = STATE_LOAD_MENU; // Switch to the load menu state
+            refreshSaveList(); 
+            currentState = STATE_LOAD_MENU; 
+            menuSelection = 0; 
         } else if (menuSelection == 2) { // Quit
             Gdx.app.exit();
         }
     }
-
+    
+    private void handleNewGameSelection(int selection) {
+        if (selection == 0) { // Single Player
+            startGame(MODE_SINGLE_PLAYER);
+        } else if (selection == 1) { // Bot Player
+            // When selecting Bot Player from the menu, we want a NEW grid
+            startGame(MODE_BOT_PLAYER);
+        } else if (selection == 2) { // Return to Main Menu
+            currentState = STATE_MAIN_MENU;
+        }
+    }
 
     @Override
     public boolean touchDown(int screenX, int screenY, int pointer, int button) {
@@ -741,9 +1009,37 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
             return false;
         }
+        
+        // 2. STATE: NEW GAME MENU Clicks
+        if (currentState == STATE_NEW_GAME_MENU) {
+            float startY = menuCenterY + MENU_START_Y_OFFSET;
+            float optionHeight = 30; // Spacing is 30 in render
+            
+            // Single Player (i=0)
+            float singlePlayerY = startY;
+            if (worldX > optionX && worldX < optionX + optionWidth && worldY > singlePlayerY - 20 && worldY < singlePlayerY + 5) {
+                handleNewGameSelection(0);
+                return true;
+            }
+
+            // Bot Player (i=1)
+            float botPlayerY = startY - optionHeight;
+            if (worldX > optionX && worldX < optionX + optionWidth && worldY > botPlayerY - 20 && worldY < botPlayerY + 5) {
+                handleNewGameSelection(1);
+                return true;
+            }
+            
+            // Return to Main Menu (i=2)
+            float returnY = startY - (2 * optionHeight);
+            if (worldX > optionX && worldX < optionX + optionWidth && worldY > returnY - 20 && worldY < returnY + 5) {
+                handleNewGameSelection(2);
+                return true;
+            }
+            return false;
+        }
 
 
-        // 2. STATE: MAIN MENU Clicks
+        // 3. STATE: MAIN MENU Clicks
         if (currentState == STATE_MAIN_MENU) {
             // New Game
             float newGameY = menuCenterY + MENU_START_Y_OFFSET - 80;
@@ -757,7 +1053,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 110;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > loadGameY - 20 && worldY < loadGameY + 5) {
                 menuSelection = 1;
-                handleMainMenuSelection(); // Now switches to STATE_LOAD_MENU
+                handleMainMenuSelection(); 
                 return true;
             }
             
@@ -772,7 +1068,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         }
 
 
-        // 3. STATE: PAUSE/MENU Button Logic (Active during gameplay or game over)
+        // 4. STATE: PAUSE/MENU Button Logic (Active during gameplay or game over)
         if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { 
             // Check [MENU] button click area
             float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
@@ -786,7 +1082,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
         
-        // 4. STATE: PAUSE MENU Option Clicks (Only active when paused)
+        // 5. STATE: PAUSE MENU Option Clicks (Only active when paused)
         if (currentState == STATE_PAUSED) {
             boolean isGameOver = !gameOverMessage.isEmpty();
 
@@ -800,7 +1096,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             // New Game (Shifted)
             float newGameY = menuCenterY + MENU_START_Y_OFFSET - 30;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > newGameY - 20 && worldY < newGameY + 5) {
-                startGame();
+                // Transition to mode selection menu
+                currentState = STATE_NEW_GAME_MENU;
+                menuSelection = 0;
                 return true;
             }
 
@@ -832,50 +1130,23 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         }
         return false;
     }
-    
-    private void checkGameInteraction() {
-        // If we are waiting for a shot to resolve, don't update messages
-        if (isLanceAnimating) return; 
 
+
+    /** * Checks for proximity messages and sets the game over state/message 
+     * for the human player/initial start. Bot mode handles terminal checks in botPlayerTurn().
+     */
+    private void checkGameInteraction() {
+        
         proximityMessages.clear();
         
-        if (currentState == STATE_GAME_OVER) return;
+        if (player == null || currentState == STATE_GAME_OVER) return;
         
         int playerX = player.getGridX();
         int playerY = player.getGridY();
-
-        // --- CHECK FOR IMMEDIATE COLLISIONS (Game Over/Win) ---
         
-        if (treasure.isEmpty()) { 
-             // Should not happen in a new game, but possible if loaded from a corrupt file
-             proximityMessages.add("Error: Treasure not found!");
-             return;
-        }
+        // --- PROXIMITY EFFECTS (For visual feedback) ---
         
         StaticEntity gold = treasure.get(0);
-        if (playerX == gold.getGridX() && playerY == gold.getGridY()) {
-            currentState = STATE_GAME_OVER;
-            gameOverMessage = "YOU FOUND THE TREASURE! YOU WIN! 🎉";
-            return;
-        }
-        
-        for (StaticEntity trap : traps) {
-            if (playerX == trap.getGridX() && playerY == trap.getGridY()) {
-                currentState = STATE_GAME_OVER;
-                gameOverMessage = "BOOM! You stepped on a trap. Game Over! 💀";
-                return;
-            }
-        }
-
-        // Check for Wumpus (Lose Condition) - ONLY if Wumpus is alive
-        if (isWumpusAlive && wumpus != null && playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
-            currentState = STATE_GAME_OVER;
-            gameOverMessage = "A ROAR! The Wumpus devoured you! Game Over! 😵";
-            return;
-        }
-
-        // --- CHECK FOR PROXIMITY EFFECTS ---
-        
         if (isAdjacent(playerX, playerY, gold.getGridX(), gold.getGridY())) {
             proximityMessages.add("A glow is visible");
         }
@@ -887,6 +1158,27 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         for (StaticEntity trap : traps) {
             if (isAdjacent(playerX, playerY, trap.getGridX(), trap.getGridY())) {
                 proximityMessages.add("You feel a breeze");
+            }
+        }
+
+        // If in SINGLE PLAYER mode, check for immediate death/win
+        if (currentMode == MODE_SINGLE_PLAYER) {
+            if (playerX == gold.getGridX() && playerY == gold.getGridY()) {
+                currentState = STATE_GAME_OVER;
+                gameOverMessage = "YOU FOUND THE TREASURE! YOU WIN! 🎉";
+                return;
+            }
+            for (StaticEntity trap : traps) {
+                if (playerX == trap.getGridX() && playerY == trap.getGridY()) {
+                    currentState = STATE_GAME_OVER;
+                    gameOverMessage = "BOOM! You stepped on a trap. Game Over! 💀";
+                    return;
+                }
+            }
+            if (isWumpusAlive && wumpus != null && playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
+                currentState = STATE_GAME_OVER;
+                gameOverMessage = "A ROAR! The Wumpus devoured you! Game Over! 😵";
+                return;
             }
         }
     }
@@ -967,6 +1259,30 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             font.getData().setScale(1f); // Reset font scale
         } 
         
+        // --- STATE: NEW GAME MENU (Mode Selection) ---
+        else if (currentState == STATE_NEW_GAME_MENU) {
+            font.setColor(Color.WHITE);
+            font.getData().setScale(2f);
+            font.draw(batch, "SELECT MODE", menuCenterX - 80, menuCenterY + 180);
+            font.getData().setScale(1.5f);
+            
+            // Menu Options
+            String[] options = {"Single Player", "Bot Player (Training)", "Return to Main Menu"};
+            for(int i = 0; i < options.length; i++) {
+                if (menuSelection == i) {
+                    font.setColor(Color.YELLOW); // Highlight effect
+                } else {
+                    font.setColor(Color.WHITE);
+                }
+                
+                float optionY = menuCenterY + MENU_START_Y_OFFSET - (i * 30);
+                font.draw(batch, options[i], menuCenterX - 50, optionY);
+            }
+            
+            font.getData().setScale(1f); // Reset font scale
+        }
+
+        
         // --- STATE: LOAD MENU ---
         else if (currentState == STATE_LOAD_MENU) {
             font.setColor(Color.WHITE);
@@ -1012,7 +1328,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                     float xPos = x * TILE_SIZE;
                     float yPos = y * TILE_SIZE;
                     
-                    if (isGameOver || isVisible[x][y]) {
+                    if (isGameOver || currentMode == MODE_BOT_PLAYER || isVisible[x][y]) {
                         batch.draw(pebbleTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
                         
                         if (wumpus != null && x == wumpus.getGridX() && y == wumpus.getGridY()) {
@@ -1080,7 +1396,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
 
             // 5. FOG OF WAR DRAWING
-            if (!isGameOver && !isLanceAnimating) {
+            // Show all if game over OR in Bot mode (since bot has full knowledge)
+            if (!isGameOver && !isLanceAnimating && currentMode == MODE_SINGLE_PLAYER) {
                 for (int x = 0; x < GRID_SIZE; x++) {
                     for (int y = 0; y < GRID_SIZE; y++) {
                         if (!isVisible[x][y]) {
@@ -1109,7 +1426,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
             
             // Draw Proximity Messages (Top Left)
-            if (currentState == STATE_GAMEPLAY && !proximityMessages.isEmpty()) {
+            if (!proximityMessages.isEmpty()) {
                 float messageY = viewY - 30; 
                 font.setColor(0.5f, 1.0f, 0.5f, 1.0f);
                 for (String message : proximityMessages) {
@@ -1132,7 +1449,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             if (currentState == STATE_PAUSED) {
                 font.setColor(0f, 0f, 0f, 0.7f);
                 font.getData().setScale(2f);
-                font.draw(batch, "                                                                                                                                                                                                                                               ", viewX, viewY);
+                // Draw a large background rectangle for the pause screen
+                batch.draw(pebbleTexture, viewX, viewY - viewport.getWorldHeight(), viewport.getWorldWidth(), viewport.getWorldHeight());
                 font.getData().setScale(1f);
 
                 boolean isGameOverFinal = !gameOverMessage.isEmpty();
@@ -1185,7 +1503,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         if (obstacles != null) for (StaticEntity entity : obstacles) entity.dispose();
         if (treasure != null) for (StaticEntity entity : treasure) entity.dispose();
         
-        if (player != null) player.dispose();
+        if (player != null && currentMode == MODE_SINGLE_PLAYER) player.dispose();
+        if (botPlayer != null) botPlayer.dispose(); // Dispose of botPlayer only once at the very end
         if (wumpus != null) wumpus.dispose();
         if(pebbleTexture != null) pebbleTexture.dispose();
     }
