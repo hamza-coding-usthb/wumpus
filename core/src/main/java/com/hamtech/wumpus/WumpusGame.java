@@ -13,12 +13,19 @@ import com.badlogic.gdx.InputProcessor;
 import java.util.Random;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Collections;
 import com.badlogic.gdx.math.GridPoint2;
 import com.badlogic.gdx.graphics.g2d.BitmapFont;
-import com.badlogic.gdx.graphics.g2d.GlyphLayout; // NEW: Added for text width measurement
+import com.badlogic.gdx.graphics.g2d.GlyphLayout;
 import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.math.Rectangle;
 import com.badlogic.gdx.math.MathUtils; 
+import com.badlogic.gdx.files.FileHandle;
+import java.io.IOException;
+import java.io.Writer;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Comparator; 
 
 /** {@link com.badlogic.gdx.ApplicationListener} implementation shared by all platforms. */
 public class WumpusGame extends ApplicationAdapter implements InputProcessor {
@@ -41,19 +48,25 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     
     // GAME STATE VARIABLES
     private BitmapFont font;
-    private GlyphLayout layout; // NEW: Used for calculating text width
+    private GlyphLayout layout;
     private String gameOverMessage = "";
-    private List<String> proximityMessages;
+    private List<String> proximityMessages; // ERROR FIX: Will now be initialized in create()
     private boolean[][] isVisible;
     
     private float gameTime = 0.0f; 
 
+    // SAVE FILE CONSTANTS
+    private final String SAVE_FOLDER = "wumpus_saves/";
+    private final String SAVE_BASE_NAME = "save";
+    private List<SaveMetadata> saveList; 
+    private int loadSelection = 0; 
     
     // APPLICATION FLOW STATES
     private final int STATE_MAIN_MENU = 0;
     private final int STATE_GAMEPLAY = 1;
     private final int STATE_PAUSED = 2;
     private final int STATE_GAME_OVER = 3;
+    private final int STATE_LOAD_MENU = 4;
     private int currentState = STATE_MAIN_MENU; 
     
     // LANCE/SHOOTING/ANIMATION VARIABLES
@@ -86,6 +99,19 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     public static final int TILE_SIZE = 32;
     public static final float WORLD_WIDTH = GRID_SIZE * TILE_SIZE;
     public static final float WORLD_HEIGHT = GRID_SIZE * TILE_SIZE;
+
+    /** Inner class to hold the necessary data for displaying a save file in the load menu. */
+    private static class SaveMetadata {
+        String displayName;
+        String dateAndTime;
+        FileHandle file;
+
+        public SaveMetadata(String name, String dateTime, FileHandle file) {
+            this.displayName = name;
+            this.dateAndTime = dateTime;
+            this.file = file;
+        }
+    }
     
     @Override
     public void create() {
@@ -103,7 +129,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         impactTexture = new Texture("bolt06.png");    
         font = new BitmapFont(); 
         font.getData().setScale(1.0f); 
-        layout = new GlyphLayout(); // NEW: Initialize the GlyphLayout
+        layout = new GlyphLayout();
+        saveList = new ArrayList<>(); // Initialize save list
+        proximityMessages = new ArrayList<>(); // FIX: Initialize proximityMessages here
 
         
         // Initialize menu button bounds
@@ -112,6 +140,265 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         menuButtonBounds = new Rectangle(menuX, menuY, MENU_BUTTON_WIDTH, MENU_BUTTON_HEIGHT);
 
         Gdx.input.setInputProcessor(this);
+    }
+
+    /** Finds all existing save files, extracts metadata, and populates the saveList. */
+    private void refreshSaveList() {
+        FileHandle dir = Gdx.files.local(SAVE_FOLDER);
+        if (!dir.exists()) {
+            dir.mkdirs();
+            saveList.clear();
+            return;
+        }
+
+        FileHandle[] files = dir.list((file, name) -> name.endsWith(".txt"));
+        saveList.clear();
+
+        for (FileHandle file : files) {
+            try {
+                // Read the first few lines to get metadata
+                String content = file.readString();
+                String[] lines = content.split("\n");
+                
+                String saveName = "Unknown Save";
+                String saveDate = "Unknown Date";
+
+                for (String line : lines) {
+                    if (line.startsWith("SAVE_NAME=")) {
+                        saveName = line.substring("SAVE_NAME=".length());
+                    } else if (line.startsWith("SAVE_DATE=")) {
+                        saveDate = line.substring("SAVE_DATE=".length());
+                    }
+                }
+                
+                if (!saveName.equals("Unknown Save")) {
+                    saveList.add(new SaveMetadata(saveName, saveDate, file));
+                }
+                
+            } catch (Exception e) {
+                Gdx.app.error("SAVE_SCAN", "Error reading metadata from file: " + file.name() + " - " + e.getMessage());
+            }
+        }
+        
+        // Sort the list by filename (e.g., save1, save2, save3) to keep a consistent order
+        Collections.sort(saveList, Comparator.comparing(meta -> meta.file.name()));
+        loadSelection = 0; // Reset selection to the first item
+    }
+
+
+    /** Parses the content of a save file and loads the game state. */
+    private void loadGame(FileHandle file) {
+        Gdx.app.log("WUMPUS_LOAD", "Loading game from: " + file.path());
+        
+        // 1. Reset everything before loading
+        if (player != null) player.dispose();
+        if (wumpus != null) wumpus.dispose();
+        traps = new ArrayList<>();
+        obstacles = new ArrayList<>();
+        treasure = new ArrayList<>();
+        proximityMessages.clear(); // This line now works because it's initialized in create()
+        gameOverMessage = ""; 
+        isShootingMode = false;
+        isLanceAnimating = false;
+        
+        // Initialize FoW structure
+        isVisible = new boolean[GRID_SIZE][GRID_SIZE];
+
+        try {
+            String content = file.readString();
+            String[] lines = content.split("\n");
+            
+            // Temporary variables for construction
+            int pX = 0, pY = 0;
+            int wX = -1, wY = -1; // Default to non-existent
+            
+            for (String line : lines) {
+                if (line.isEmpty()) continue;
+                String[] parts = line.split("=", 2);
+                if (parts.length < 2) continue;
+                String key = parts[0].trim();
+                String value = parts[1].trim();
+                
+                switch (key) {
+                    case "GAME_TIME":
+                        gameTime = Float.parseFloat(value);
+                        break;
+                    case "PLAYER_POS":
+                        String[] pos = value.split(",");
+                        pX = Integer.parseInt(pos[0]);
+                        pY = Integer.parseInt(pos[1]);
+                        break;
+                    case "LANCE_STATUS":
+                        hasLance = Boolean.parseBoolean(value);
+                        break;
+                    case "WUMPUS_ALIVE":
+                        isWumpusAlive = Boolean.parseBoolean(value);
+                        break;
+                    case "WUMPUS_POS":
+                        String[] wPos = value.split(",");
+                        wX = Integer.parseInt(wPos[0]);
+                        wY = Integer.parseInt(wPos[1]);
+                        break;
+                    case "TRAPS":
+                        if (!value.isEmpty()) {
+                            for (String trapPos : value.split("\\|")) {
+                                String[] coords = trapPos.split(",");
+                                traps.add(new StaticEntity("dngn_trap_arrow.png", Integer.parseInt(coords[0]), Integer.parseInt(coords[1])));
+                            }
+                        }
+                        break;
+                    case "OBSTACLES":
+                        if (!value.isEmpty()) {
+                            for (String obsPos : value.split("\\|")) {
+                                String[] coords = obsPos.split(",");
+                                obstacles.add(new StaticEntity("crumbled_column.png", Integer.parseInt(coords[0]), Integer.parseInt(coords[1])));
+                            }
+                        }
+                        break;
+                    case "TREASURE_POS":
+                        String[] tPos = value.split(",");
+                        treasure.add(new StaticEntity("gold_pile.png", Integer.parseInt(tPos[0]), Integer.parseInt(tPos[1])));
+                        break;
+                    case "FOG_OF_WAR":
+                        // FOG_OF_WAR=100100... (row by row, bottom-up)
+                        for (int y = 0; y < GRID_SIZE; y++) {
+                            for (int x = 0; x < GRID_SIZE; x++) {
+                                int index = y * GRID_SIZE + x;
+                                if (index < value.length()) {
+                                    isVisible[x][y] = (value.charAt(index) == '1');
+                                }
+                            }
+                        }
+                        break;
+                }
+            }
+            
+            // 2. Initialize the main entities (must be done after reading positions)
+            player = new Player("donald.png", pX, pY);
+            if (wX != -1 && wY != -1) {
+                wumpus = new Wumpus("sphinx.png", wX, wY);
+            }
+
+            // 3. Finalize and switch state
+            centerCameraOnPlayer();
+            checkGameInteraction(); // Check proximity for messages
+            currentState = STATE_GAMEPLAY;
+            proximityMessages.add("Game loaded successfully!");
+
+        } catch (Exception e) {
+            Gdx.app.error("WUMPUS_LOAD", "Failed to load game: " + e.getMessage());
+            currentState = STATE_MAIN_MENU; // Go back to main menu on critical error
+            proximityMessages.clear();
+            proximityMessages.add("Error loading save file!");
+        }
+    }
+
+
+    /** Finds all existing save files and returns the next incremental save name (e.g., "save3.txt"). */
+    private String getNextSaveName() {
+        FileHandle dir = Gdx.files.local(SAVE_FOLDER);
+        if (!dir.exists()) {
+            dir.mkdirs(); // Create the directory if it doesn't exist
+        }
+
+        // List files that start with the base name and end with ".txt"
+        FileHandle[] files = dir.list((file, name) -> name.startsWith(SAVE_BASE_NAME) && name.endsWith(".txt"));
+
+        int maxNum = 0;
+        for (FileHandle file : files) {
+            String name = file.nameWithoutExtension();
+            try {
+                // Extract the number part: "save1" -> "1"
+                String numStr = name.substring(SAVE_BASE_NAME.length());
+                int num = Integer.parseInt(numStr);
+                if (num > maxNum) {
+                    maxNum = num;
+                }
+            } catch (NumberFormatException | StringIndexOutOfBoundsException e) {
+                // Ignore files that don't match the saveN format
+                Gdx.app.log("SAVE_FILE_SCAN", "Ignoring malformed save file: " + file.name());
+            }
+        }
+        
+        return SAVE_BASE_NAME + (maxNum + 1) + ".txt";
+    }
+
+    /** Saves the current game state to a file. */
+    private void saveGame(String requestedName) {
+        String fileName = requestedName.isEmpty() ? getNextSaveName() : requestedName.replaceAll("[^a-zA-Z0-9_-]", "") + ".txt";
+        FileHandle file = Gdx.files.local(SAVE_FOLDER + fileName);
+        
+        DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
+        LocalDateTime now = LocalDateTime.now();
+        
+        StringBuilder saveContent = new StringBuilder();
+        
+        // METADATA
+        String saveDisplayName = requestedName.isEmpty() ? fileName.substring(0, fileName.length() - 4) : requestedName;
+        saveContent.append("SAVE_NAME=").append(saveDisplayName).append("\n");
+        saveContent.append("SAVE_DATE=").append(dtf.format(now)).append("\n");
+        saveContent.append("GAME_TIME=").append(gameTime).append("\n");
+        
+        // PLAYER STATE
+        saveContent.append("PLAYER_POS=").append(player.getGridX()).append(",").append(player.getGridY()).append("\n");
+        saveContent.append("LANCE_STATUS=").append(hasLance).append("\n");
+        
+        // WUMPUS STATE
+        saveContent.append("WUMPUS_ALIVE=").append(isWumpusAlive).append("\n");
+        if (wumpus != null) {
+            saveContent.append("WUMPUS_POS=").append(wumpus.getGridX()).append(",").append(wumpus.getGridY()).append("\n");
+        } else {
+             saveContent.append("WUMPUS_POS=-1,-1\n");
+        }
+        
+        // ENTITIES (Traps, Obstacles, Treasure)
+        
+        // Traps
+        saveContent.append("TRAPS=");
+        for (StaticEntity trap : traps) {
+            saveContent.append(trap.getGridX()).append(",").append(trap.getGridY()).append("|");
+        }
+        if (traps.size() > 0) saveContent.setLength(saveContent.length() - 1); // Remove trailing '|'
+        saveContent.append("\n");
+
+        // Obstacles
+        saveContent.append("OBSTACLES=");
+        for (StaticEntity obstacle : obstacles) {
+            saveContent.append(obstacle.getGridX()).append(",").append(obstacle.getGridY()).append("|");
+        }
+        if (obstacles.size() > 0) saveContent.setLength(saveContent.length() - 1); // Remove trailing '|'
+        saveContent.append("\n");
+        
+        // Treasure (Gold) - assuming there's only one
+        if (!treasure.isEmpty()) {
+            StaticEntity gold = treasure.get(0);
+            saveContent.append("TREASURE_POS=").append(gold.getGridX()).append(",").append(gold.getGridY()).append("\n");
+        }
+        
+        // FOG OF WAR (isVisible) - Format: FoW=100100... (row by row, bottom-up)
+        saveContent.append("FOG_OF_WAR=");
+        for (int y = 0; y < GRID_SIZE; y++) {
+            for (int x = 0; x < GRID_SIZE; x++) {
+                saveContent.append(isVisible[x][y] ? '1' : '0');
+            }
+        }
+        saveContent.append("\n");
+
+        // Write to file
+        try (Writer writer = file.writer(false)) { // false means not append
+            writer.write(saveContent.toString());
+            Gdx.app.log("WUMPUS_SAVE", "Game successfully saved to: " + file.path());
+            proximityMessages.clear();
+            proximityMessages.add("Game saved as: " + saveDisplayName);
+        } catch (IOException e) {
+            Gdx.app.error("WUMPUS_SAVE", "Error writing save file: " + e.getMessage());
+            proximityMessages.clear();
+            proximityMessages.add("Save failed! Check logs.");
+        }
+        
+        // Reset shooting mode and unpause
+        isShootingMode = false;
+        currentState = STATE_GAMEPLAY; 
     }
     
     /** Initializes all game entities and resets state for a new game. */
@@ -127,7 +414,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         traps = new ArrayList<>();
         obstacles = new ArrayList<>();
         treasure = new ArrayList<>();
-        proximityMessages = new ArrayList<>();
+        // proximityMessages is already initialized in create(), just clear it
+        proximityMessages.clear(); 
         gameOverMessage = ""; 
         currentState = STATE_GAMEPLAY;
         gameTime = 0.0f; 
@@ -237,7 +525,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             impactTimer = IMPACT_DURATION;
         } else {
             // Check for Wumpus hit
-            if (isWumpusAlive && targetX == wumpus.getGridX() && targetY == wumpus.getGridY()) {
+            if (isWumpusAlive && wumpus != null && targetX == wumpus.getGridX() && targetY == wumpus.getGridY()) {
                 isWumpusAlive = false;
                 currentState = STATE_GAME_OVER;
                 gameOverMessage = "WUMPUS SLAIN! YOU WIN! 🎉";
@@ -289,7 +577,25 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
     @Override
     public boolean keyDown(int keycode) {
-        // Main Menu Navigation
+        // --- LOAD MENU NAVIGATION ---
+        if (currentState == STATE_LOAD_MENU) {
+            if (keycode == Keys.UP) {
+                loadSelection = Math.max(0, loadSelection - 1);
+                return true;
+            } else if (keycode == Keys.DOWN) {
+                loadSelection = Math.min(saveList.size() - 1, loadSelection + 1);
+                return true;
+            } else if (keycode == Keys.ENTER && !saveList.isEmpty()) {
+                loadGame(saveList.get(loadSelection).file);
+                return true;
+            } else if (keycode == Keys.ESCAPE) {
+                // Go back to the main menu
+                currentState = STATE_MAIN_MENU;
+                return true;
+            }
+        }
+        
+        // --- MAIN MENU NAVIGATION ---
         if (currentState == STATE_MAIN_MENU) {
             if (keycode == Keys.UP) {
                 menuSelection = (menuSelection - 1 + 3) % 3; // Cycle 0-2 (New, Load, Quit)
@@ -303,27 +609,27 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
         
-        // LANCE SHOOTING LOGIC (Only in gameplay state)
+        // --- GAMEPLAY/SHOOTING LOGIC ---
         if (currentState == STATE_GAMEPLAY) {
             
             // 1. SPACE BAR: TOGGLE SHOOTING MODE
             if (keycode == Keys.SPACE) {
-                if (isLanceAnimating) return true; // Cannot toggle while shooting
+                if (isLanceAnimating) return true;
                 
-                proximityMessages.clear(); // Clear other messages when toggling
+                proximityMessages.clear();
                 if (hasLance) {
-                    isShootingMode = !isShootingMode; // Toggle mode
+                    isShootingMode = !isShootingMode;
                     if (isShootingMode) {
                         proximityMessages.add("Lance equipped!");
                     }
                 } else {
                     proximityMessages.add("Lance already used.");
-                    isShootingMode = false; // Ensure mode is off if lance is used
+                    isShootingMode = false;
                 }
                 return true;
             }
 
-            // 2. SHOOTING ACTION (Directional key while in shoot mode)
+            // 2. SHOOTING ACTION
             if (isShootingMode) {
                 int dx = 0, dy = 0;
                 if (keycode == Keys.LEFT) dx = -1;
@@ -332,30 +638,22 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 else if (keycode == Keys.DOWN) dy = -1;
 
                 if (dx != 0 || dy != 0) {
-                    
-                    if (isLanceAnimating) return true; // Should be blocked by space check, but safety check
+                    if (isLanceAnimating) return true;
 
-                    // Set up animation coordinates
                     lanceStartX = player.getGridX();
                     lanceStartY = player.getGridY();
                     lanceEndX = lanceStartX + dx;
                     lanceEndY = lanceStartY + dy;
 
-                    // Calculate rotation for the lance sprite
                     if (dx == 1) lanceRotation = 0f;
                     else if (dx == -1) lanceRotation = 180f;
                     else if (dy == 1) lanceRotation = 90f;
                     else if (dy == -1) lanceRotation = 270f;
                     
-                    // Start animation
                     isLanceAnimating = true;
                     lanceAnimTimer = 0.0f;
                     showImpact = false;
-                    
-                    // Clear shooting message
                     proximityMessages.clear();
-                    
-                    // Exit shooting mode
                     isShootingMode = false; 
                     
                     return true;
@@ -403,8 +701,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         if (menuSelection == 0) { // New Game
             startGame();
         } else if (menuSelection == 1) { // Load Game
-            // Placeholder: Switch state to gameplay for testing if load was successful
-            Gdx.app.log("WUMPUS_GAME", "Load Game (Not implemented)");
+            refreshSaveList(); // Load the list of available saves
+            currentState = STATE_LOAD_MENU; // Switch to the load menu state
         } else if (menuSelection == 2) { // Quit
             Gdx.app.exit();
         }
@@ -425,7 +723,27 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         float optionX = menuCenterX - 50; 
         float optionWidth = 200; 
 
-        // 1. MAIN MENU Clicks
+        // 1. STATE: LOAD MENU Clicks
+        if (currentState == STATE_LOAD_MENU) {
+            float startY = menuCenterY + MENU_START_Y_OFFSET - 80;
+            float optionHeight = 20;
+            for(int i = 0; i < saveList.size(); i++) {
+                float optionY = startY - (i * optionHeight * 1.5f); // 1.5f for spacing
+                if (worldX > optionX && worldX < optionX + 300 && worldY > optionY - 15 && worldY < optionY + 5) {
+                    loadGame(saveList.get(i).file);
+                    return true;
+                }
+            }
+            // Add a check to go back (Clicking near the [BACK] label)
+            if (worldX > optionX && worldX < optionX + 100 && worldY < menuCenterY + 180 && worldY > menuCenterY + 150) {
+                currentState = STATE_MAIN_MENU;
+                return true;
+            }
+            return false;
+        }
+
+
+        // 2. STATE: MAIN MENU Clicks
         if (currentState == STATE_MAIN_MENU) {
             // New Game
             float newGameY = menuCenterY + MENU_START_Y_OFFSET - 80;
@@ -439,7 +757,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 110;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > loadGameY - 20 && worldY < loadGameY + 5) {
                 menuSelection = 1;
-                handleMainMenuSelection();
+                handleMainMenuSelection(); // Now switches to STATE_LOAD_MENU
                 return true;
             }
             
@@ -454,7 +772,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         }
 
 
-        // 2. PAUSE/MENU Button Logic (Active during gameplay or game over)
+        // 3. STATE: PAUSE/MENU Button Logic (Active during gameplay or game over)
         if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { 
             // Check [MENU] button click area
             float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
@@ -468,7 +786,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
         
-        // 3. PAUSE MENU Option Clicks (Only active when paused)
+        // 4. STATE: PAUSE MENU Option Clicks (Only active when paused)
         if (currentState == STATE_PAUSED) {
             boolean isGameOver = !gameOverMessage.isEmpty();
 
@@ -491,8 +809,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > saveGameY - 20 && worldY < saveGameY + 5) {
                 // If game is over, prevent saving
                 if (!isGameOver) { 
-                    currentState = STATE_GAMEPLAY; // Close menu after 'saving'
-                    Gdx.app.log("WUMPUS_GAME", "Save Game (Not fully implemented)");
+                    saveGame(""); 
                 }
                 return true;
             }
@@ -500,8 +817,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             // Load Game (Shifted)
             float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 90;
             if (worldX > optionX && worldX < optionX + optionWidth && worldY > loadGameY - 20 && worldY < loadGameY + 5) {
-                currentState = STATE_GAMEPLAY; // Close menu after 'loading'
-                Gdx.app.log("WUMPUS_GAME", "Load Game (Not fully implemented)");
+                refreshSaveList(); // Load the list of available saves
+                currentState = STATE_LOAD_MENU; // Switch to the load menu state
                 return true;
             }
             
@@ -529,6 +846,12 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
         // --- CHECK FOR IMMEDIATE COLLISIONS (Game Over/Win) ---
         
+        if (treasure.isEmpty()) { 
+             // Should not happen in a new game, but possible if loaded from a corrupt file
+             proximityMessages.add("Error: Treasure not found!");
+             return;
+        }
+        
         StaticEntity gold = treasure.get(0);
         if (playerX == gold.getGridX() && playerY == gold.getGridY()) {
             currentState = STATE_GAME_OVER;
@@ -545,7 +868,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         }
 
         // Check for Wumpus (Lose Condition) - ONLY if Wumpus is alive
-        if (isWumpusAlive && playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
+        if (isWumpusAlive && wumpus != null && playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
             currentState = STATE_GAME_OVER;
             gameOverMessage = "A ROAR! The Wumpus devoured you! Game Over! 😵";
             return;
@@ -558,7 +881,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         }
         
         // Wumpus Proximity - ONLY if Wumpus is alive
-        if (isWumpusAlive && isAdjacent(playerX, playerY, wumpus.getGridX(), wumpus.getGridY())) { 
+        if (isWumpusAlive && wumpus != null && isAdjacent(playerX, playerY, wumpus.getGridX(), wumpus.getGridY())) { 
             proximityMessages.add("You can smell a stench");
         }
         for (StaticEntity trap : traps) {
@@ -617,15 +940,13 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         // Calculate coordinates relative to the screen view
         float viewX = camera.position.x - viewport.getWorldWidth() / 2f;
         float viewY = camera.position.y + viewport.getWorldHeight() / 2f;
+        float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
+        float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
 
 
         // --- STATE: MAIN MENU ---
         if (currentState == STATE_MAIN_MENU) {
             font.setColor(Color.WHITE);
-            float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
-            float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
-
-            // WUMPUS Title
             font.getData().setScale(3f);
             font.draw(batch, "WUMPUS", menuCenterX - 120, menuCenterY + 180);
             font.getData().setScale(1.5f);
@@ -639,7 +960,6 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                     font.setColor(Color.WHITE);
                 }
                 
-                // Quit is index 2, Load is 1, New is 0. Draw order: New, Load, Quit (descending Y)
                 float optionY = menuCenterY + MENU_START_Y_OFFSET - 80 - (i * 30);
                 font.draw(batch, options[i], menuCenterX - 50, optionY);
             }
@@ -647,11 +967,46 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             font.getData().setScale(1f); // Reset font scale
         } 
         
+        // --- STATE: LOAD MENU ---
+        else if (currentState == STATE_LOAD_MENU) {
+            font.setColor(Color.WHITE);
+
+            // Title
+            font.getData().setScale(2f);
+            font.draw(batch, "LOAD GAME", menuCenterX - 80, menuCenterY + 180);
+            font.getData().setScale(1f);
+            
+            // Back Option
+            font.draw(batch, "[BACK]", menuCenterX - 50, menuCenterY + 150);
+            
+            if (saveList.isEmpty()) {
+                font.draw(batch, "No saved games found.", menuCenterX - 100, menuCenterY);
+            } else {
+                float startY = menuCenterY + MENU_START_Y_OFFSET - 80;
+                float optionHeight = 20;
+                
+                // Draw the list of saves
+                for (int i = 0; i < saveList.size(); i++) {
+                    SaveMetadata metadata = saveList.get(i);
+                    float optionY = startY - (i * optionHeight * 1.5f);
+                    
+                    if (loadSelection == i) {
+                        font.setColor(Color.YELLOW); // Highlight
+                    } else {
+                        font.setColor(Color.WHITE);
+                    }
+                    
+                    String displayString = String.format("%-15s - %s", metadata.displayName, metadata.dateAndTime);
+                    font.draw(batch, displayString, menuCenterX - 150, optionY);
+                }
+            }
+        }
+        
         // --- STATE: GAMEPLAY, PAUSED, GAME OVER ---
         else {
             boolean isGameOver = (currentState == STATE_GAME_OVER);
             
-            // 1. Draw Grid and Entities (Only visible tiles or entire map if game over)
+            // 1. Draw Grid and Entities
             for (int x = 0; x < GRID_SIZE; x++) {
                 for (int y = 0; y < GRID_SIZE; y++) {
                     float xPos = x * TILE_SIZE;
@@ -660,17 +1015,14 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                     if (isGameOver || isVisible[x][y]) {
                         batch.draw(pebbleTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
                         
-                        // Draw Wumpus (or blood if dead)
                         if (wumpus != null && x == wumpus.getGridX() && y == wumpus.getGridY()) {
                             if (isWumpusAlive) {
                                 wumpus.draw(batch, TILE_SIZE);
                             } else {
-                                // Draw blood if Wumpus is dead
                                 batch.draw(wumpusDeadTexture, xPos, yPos, TILE_SIZE, TILE_SIZE); 
                             }
                         }
                         
-                        // Draw other entities
                         for (StaticEntity entity : treasure) {
                             if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
                         }
@@ -687,37 +1039,36 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
             
             // 2. Draw Player
-            player.draw(batch, TILE_SIZE);
+            if (player != null) {
+                player.draw(batch, TILE_SIZE);
+            }
             
             // 3. Draw Lance Animation
             if (isLanceAnimating) {
                 float t = lanceAnimTimer / LANCE_ANIM_DURATION;
                 
-                // Interpolated value (from 0.0 to 1.0)
                 float startPixelX = lanceStartX * TILE_SIZE + (TILE_SIZE / 2f);
                 float startPixelY = lanceStartY * TILE_SIZE + (TILE_SIZE / 2f);
                 float endPixelX = lanceEndX * TILE_SIZE + (TILE_SIZE / 2f);
                 float endPixelY = lanceEndY * TILE_SIZE + (TILE_SIZE / 2f);
                 
-                // Calculate current interpolated position (center of tile to center of tile)
                 float currentPixelX = MathUtils.lerp(startPixelX, endPixelX, t);
                 float currentPixelY = MathUtils.lerp(startPixelY, endPixelY, t);
                 
-                // Draw Lance at interpolated position
                 batch.draw(
                     lanceTexture, 
-                    currentPixelX - (TILE_SIZE / 2f), // x position (adjusted for sprite origin)
-                    currentPixelY - (TILE_SIZE / 2f), // y position (adjusted for sprite origin)
-                    TILE_SIZE / 2f,                   // origin X (center of sprite for rotation)
-                    TILE_SIZE / 2f,                   // origin Y
-                    TILE_SIZE,                        // width
-                    TILE_SIZE,                        // height
-                    1f, 1f,                           // scale X, Y
-                    lanceRotation,                    // rotation
-                    0, 0,                             // srcX, srcY
-                    lanceTexture.getWidth(),          // srcWidth
-                    lanceTexture.getHeight(),         // srcHeight
-                    false, false                      // flipX, flipY
+                    currentPixelX - (TILE_SIZE / 2f), 
+                    currentPixelY - (TILE_SIZE / 2f), 
+                    TILE_SIZE / 2f, 
+                    TILE_SIZE / 2f, 
+                    TILE_SIZE, 
+                    TILE_SIZE, 
+                    1f, 1f, 
+                    lanceRotation, 
+                    0, 0, 
+                    lanceTexture.getWidth(), 
+                    lanceTexture.getHeight(), 
+                    false, false
                 );
             }
             
@@ -729,7 +1080,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
 
             // 5. FOG OF WAR DRAWING
-            if (!isGameOver && !isLanceAnimating) { // Hide FoW during the short animation
+            if (!isGameOver && !isLanceAnimating) {
                 for (int x = 0; x < GRID_SIZE; x++) {
                     for (int y = 0; y < GRID_SIZE; y++) {
                         if (!isVisible[x][y]) {
@@ -741,16 +1092,11 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 }
             }
 
-            // 6. UI DRAWING (HUD, Messages, Pause Menu)
-
-            // Draw Timer (Top Center)
+            // 6. UI DRAWING
             font.setColor(Color.WHITE);
             String timerDisplay = "Time: " + formatTime(gameTime);
-            
-            // FIX: Use GlyphLayout to get the width
             layout.setText(font, timerDisplay);
             float textWidth = layout.width;
-            
             float timerX = viewX + (viewport.getWorldWidth() / 2f) - (textWidth / 2f);
             font.draw(batch, timerDisplay, timerX, viewY - 10);
 
@@ -758,14 +1104,14 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { 
                 font.setColor(Color.WHITE);
                 float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
-                float btnY = viewY - 30; // Shifted down to avoid colliding with timer
+                float btnY = viewY - 30; 
                 font.draw(batch, "[MENU]", btnX, btnY);
             }
             
             // Draw Proximity Messages (Top Left)
             if (currentState == STATE_GAMEPLAY && !proximityMessages.isEmpty()) {
-                float messageY = viewY - 30; // Shifted down to avoid colliding with timer
-                font.setColor(0.5f, 1.0f, 0.5f, 1.0f); // Light green for effects
+                float messageY = viewY - 30; 
+                font.setColor(0.5f, 1.0f, 0.5f, 1.0f);
                 for (String message : proximityMessages) {
                     font.draw(batch, message, viewX + 10, messageY); 
                     messageY -= 20;
@@ -775,31 +1121,25 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             // Draw Game Over Message
             if (isGameOver) {
                 if (gameOverMessage.contains("WIN")) {
-                    font.setColor(1.0f, 1.0f, 0.0f, 1.0f); // Gold/Yellow for win
+                    font.setColor(1.0f, 1.0f, 0.0f, 1.0f);
                 } else {
-                    font.setColor(1.0f, 0.0f, 0.0f, 1.0f); // Red for lose
+                    font.setColor(1.0f, 0.0f, 0.0f, 1.0f);
                 }
                 font.draw(batch, gameOverMessage, viewX + 50, viewY - 50); 
             } 
             
             // Draw PAUSE MENU Overlay
             if (currentState == STATE_PAUSED) {
-                // Draw a semi-transparent black overlay
                 font.setColor(0f, 0f, 0f, 0.7f);
                 font.getData().setScale(2f);
-                // Simple way to draw a full-screen semi-transparent rectangle using the font
-                // This draws a large block of invisible characters
                 font.draw(batch, "                                                                                                                                                                                                                                               ", viewX, viewY);
                 font.getData().setScale(1f);
 
-                float menuCenterX = viewX + viewport.getWorldWidth() / 2f;
-                float menuCenterY = viewY - viewport.getWorldHeight() / 2f;
-                boolean isGameOverFinal = !gameOverMessage.isEmpty(); // Check if game is over
+                boolean isGameOverFinal = !gameOverMessage.isEmpty();
 
                 font.setColor(Color.WHITE);
                 font.draw(batch, "PAUSED", menuCenterX - 50, menuCenterY + MENU_START_Y_OFFSET + 30);
                 
-                // Resume Game (Top item)
                 float resumeGameY = menuCenterY + MENU_START_Y_OFFSET;
                 if (isGameOverFinal) {
                     font.setColor(Color.GRAY);
@@ -808,12 +1148,10 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 }
                 font.draw(batch, "Resume", menuCenterX - 50, resumeGameY);
                 
-                // New Game (Shifted)
                 float newGameY = menuCenterY + MENU_START_Y_OFFSET - 30;
-                font.setColor(Color.WHITE); // Always white
+                font.setColor(Color.WHITE);
                 font.draw(batch, "New Game", menuCenterX - 50, newGameY);
                 
-                // Save Game (Shifted, Grayed out on Game Over)
                 float saveGameY = menuCenterY + MENU_START_Y_OFFSET - 60;
                 if (isGameOverFinal) {
                     font.setColor(Color.GRAY);
@@ -822,12 +1160,10 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 }
                 font.draw(batch, "Save Game", menuCenterX - 50, saveGameY);
                 
-                // Load Game (Shifted)
                 float loadGameY = menuCenterY + MENU_START_Y_OFFSET - 90;
                 font.setColor(Color.WHITE); 
                 font.draw(batch, "Load Game", menuCenterX - 50, loadGameY);
                 
-                // Quit to Menu (Shifted)
                 float quitY = menuCenterY + MENU_START_Y_OFFSET - 120;
                 font.draw(batch, "Quit to Menu", menuCenterX - 50, quitY);
             }
@@ -840,18 +1176,17 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     public void dispose() {
         batch.dispose();
         font.dispose();
-        fogOfWarTexture.dispose();
-        wumpusDeadTexture.dispose(); 
-        lanceTexture.dispose(); 
-        impactTexture.dispose(); 
+        if(fogOfWarTexture != null) fogOfWarTexture.dispose();
+        if(wumpusDeadTexture != null) wumpusDeadTexture.dispose(); 
+        if(lanceTexture != null) lanceTexture.dispose(); 
+        if(impactTexture != null) impactTexture.dispose(); 
         
-        // Dispose textures for all static entities (only if they were initialized)
         if (traps != null) for (StaticEntity entity : traps) entity.dispose();
         if (obstacles != null) for (StaticEntity entity : obstacles) entity.dispose();
         if (treasure != null) for (StaticEntity entity : treasure) entity.dispose();
         
         if (player != null) player.dispose();
         if (wumpus != null) wumpus.dispose();
-        pebbleTexture.dispose();
+        if(pebbleTexture != null) pebbleTexture.dispose();
     }
 }
