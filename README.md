@@ -4,6 +4,29 @@ A [libGDX](https://libgdx.com/) project generated with [gdx-liftoff](https://git
 
 This project was generated with a template including simple application launchers and an `ApplicationAdapter` extension that draws libGDX logo.
 
+---
+
+## Game Development Summary: Q-Learning Bot
+
+This project was extended from a basic Wumpus-like cave game into an environment for **Reinforcement Learning (RL)**, specifically using the **Q-Learning** algorithm.
+
+### Key Features Implemented:
+
+* **Wumpus Environment:** An 8x8 grid world featuring a **Player**, **Wumpus**, **Traps**, **Treasure**, and **Obstacles**.
+* **Game Modes:** Supports both **Single Player** (human-controlled with Fog of War) and **Bot Player (Training)** modes.
+* **Q-Learning Agent:** The bot uses an Epsilon-Greedy strategy to explore and exploit the environment. It leverages **rewards** based on movement (`-1.0`), hitting obstacles/walls (medium penalty), and terminal states (**Win** `+100.0`, **Loss** `-100.0`).
+* **Fixed Grid Training:** Critically, the bot's training is conducted on a **single, unchanging grid layout**. When the bot loses an episode (hits a trap or the Wumpus), the environment resets the bot's position, game state (lance, Wumpus status), and episode counter, but **retains the exact positions of the Wumpus, Traps, Treasure, and Obstacles**. This ensures the Q-Table learns the optimal path for that specific map configuration.
+
+---
+
+## Screenshots
+
+An example of the game environment and the bot's interaction:
+
+![Game Screenshot](screencapture.jpg)
+
+---
+
 ## Platforms
 
 - `core`: Main module with the application logic shared by all platforms.
