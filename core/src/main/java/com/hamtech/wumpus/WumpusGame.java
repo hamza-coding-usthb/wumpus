@@ -17,6 +17,7 @@ import com.badlogic.gdx.math.GridPoint2;
 import com.badlogic.gdx.graphics.g2d.BitmapFont;
 import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.math.Rectangle;
+import com.badlogic.gdx.math.MathUtils; // Added for interpolation and rotation
 
 /** {@link com.badlogic.gdx.ApplicationListener} implementation shared by all platforms. */
 public class WumpusGame extends ApplicationAdapter implements InputProcessor {
@@ -33,6 +34,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private Viewport viewport;
     private Texture pebbleTexture;
     private Texture fogOfWarTexture;
+    private Texture wumpusDeadTexture;
+    private Texture lanceTexture;   // NEW
+    private Texture impactTexture;  // NEW
     
     // GAME STATE VARIABLES
     private BitmapFont font;
@@ -47,9 +51,25 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     private final int STATE_GAME_OVER = 3;
     private int currentState = STATE_MAIN_MENU; // Starts on Main Menu
     
+    // LANCE/SHOOTING/ANIMATION VARIABLES
+    private boolean hasLance = true;
+    private boolean isShootingMode = false;
+    private boolean isWumpusAlive = true;
+    
+    private boolean isLanceAnimating = false;      // NEW: Animation flag
+    private float lanceAnimTimer = 0.0f;           // NEW: Timer for animation
+    private final float LANCE_ANIM_DURATION = 0.2f; // NEW: Duration (shorter for snappier feel)
+    private int lanceStartX, lanceStartY;          // NEW: Starting tile coordinates (in grid)
+    private int lanceEndX, lanceEndY;              // NEW: Ending tile coordinates (in grid)
+    private float lanceRotation = 0f;              // NEW: Rotation for the lance sprite
+    private boolean showImpact = false;            // NEW: Show impact graphic briefly
+    private float impactTimer = 0.0f;              // NEW: Timer for impact display
+    private final float IMPACT_DURATION = 0.1f;    // NEW: Duration for impact graphic
+
+    
     // MENU SPECIFIC VARIABLES
     private int menuSelection = 0; // 0: New Game, 1: Load Game, 2: Quit
-    private Rectangle menuButtonBounds; // <-- CORRECTED: FIELD DECLARATION RE-ADDED
+    private Rectangle menuButtonBounds; 
     
     // UI Constants
     private final float MENU_BUTTON_WIDTH = 70;
@@ -73,6 +93,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         // Load non-game-specific textures/fonts
         pebbleTexture = new Texture("pebble_brown0.png"); 
         fogOfWarTexture = new Texture("FogofWarSingle.png"); 
+        wumpusDeadTexture = new Texture("brown_ooze.png"); 
+        lanceTexture = new Texture("javelin2.png");   // NEW: Load Lance texture
+        impactTexture = new Texture("bolt06.png");    // NEW: Load Impact texture
         font = new BitmapFont(); 
         font.getData().setScale(1.0f); 
         
@@ -100,6 +123,13 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         proximityMessages = new ArrayList<>();
         gameOverMessage = "";
         currentState = STATE_GAMEPLAY;
+        
+        // RESET LANCE AND WUMPUS STATE
+        hasLance = true; 
+        isShootingMode = false; 
+        isWumpusAlive = true; 
+        isLanceAnimating = false; // NEW: Reset animation state
+        showImpact = false;       // NEW: Reset impact state
         
         player = new Player("donald.png", 0, 0); 
         
@@ -189,6 +219,61 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         return withinOne && notSameTile;
     }
 
+    /** Resolves the outcome of the lance shot after the animation finishes. */
+    private void resolveLanceShot(int targetX, int targetY) {
+        String shotMessage = "";
+        
+        if (targetX < 0 || targetX >= GRID_SIZE || targetY < 0 || targetY >= GRID_SIZE) {
+            shotMessage = "Shot hit the cave wall.";
+            showImpact = true;
+            impactTimer = IMPACT_DURATION;
+        } else {
+            // Check for Wumpus hit
+            if (isWumpusAlive && targetX == wumpus.getGridX() && targetY == wumpus.getGridY()) {
+                isWumpusAlive = false;
+                currentState = STATE_GAME_OVER;
+                gameOverMessage = "WUMPUS SLAIN! YOU WIN! 🎉";
+                shotMessage = "WUMPUS SLAIN!";
+            } else {
+                shotMessage = "Missed shot!";
+                showImpact = true;
+                impactTimer = IMPACT_DURATION;
+            }
+        }
+        
+        // Display message (Only if not already displaying WIN message)
+        if (currentState != STATE_GAME_OVER) {
+            proximityMessages.clear();
+            proximityMessages.add(shotMessage);
+        }
+        
+        // Final reset/consumption
+        isLanceAnimating = false;
+        hasLance = false; // Lance is always consumed upon shooting
+        isShootingMode = false;
+    }
+    
+    /** Updates game logic, including the lance animation timer. */
+    private void update(float delta) {
+        if (isLanceAnimating) {
+            lanceAnimTimer += delta;
+            
+            if (lanceAnimTimer >= LANCE_ANIM_DURATION) {
+                // Animation finished, resolve the shot
+                resolveLanceShot(lanceEndX, lanceEndY);
+                lanceAnimTimer = 0.0f; 
+            }
+        }
+        
+        if (showImpact) {
+            impactTimer -= delta;
+            if (impactTimer <= 0) {
+                showImpact = false;
+            }
+        }
+    }
+
+
     @Override
     public boolean keyDown(int keycode) {
         // Main Menu Navigation
@@ -205,8 +290,68 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
         
-        // Block movement if paused or game over
-        if (currentState != STATE_GAMEPLAY) {
+        // LANCE SHOOTING LOGIC (Only in gameplay state)
+        if (currentState == STATE_GAMEPLAY) {
+            
+            // 1. SPACE BAR: TOGGLE SHOOTING MODE
+            if (keycode == Keys.SPACE) {
+                if (isLanceAnimating) return true; // Cannot toggle while shooting
+                
+                proximityMessages.clear(); // Clear other messages when toggling
+                if (hasLance) {
+                    isShootingMode = !isShootingMode; // Toggle mode
+                    if (isShootingMode) {
+                        proximityMessages.add("Lance equipped!");
+                    }
+                } else {
+                    proximityMessages.add("Lance already used.");
+                    isShootingMode = false; // Ensure mode is off if lance is used
+                }
+                return true;
+            }
+
+            // 2. SHOOTING ACTION (Directional key while in shoot mode)
+            if (isShootingMode) {
+                int dx = 0, dy = 0;
+                if (keycode == Keys.LEFT) dx = -1;
+                else if (keycode == Keys.RIGHT) dx = 1;
+                else if (keycode == Keys.UP) dy = 1;
+                else if (keycode == Keys.DOWN) dy = -1;
+
+                if (dx != 0 || dy != 0) {
+                    
+                    if (isLanceAnimating) return true; // Should be blocked by space check, but safety check
+
+                    // Set up animation coordinates
+                    lanceStartX = player.getGridX();
+                    lanceStartY = player.getGridY();
+                    lanceEndX = lanceStartX + dx;
+                    lanceEndY = lanceStartY + dy;
+
+                    // Calculate rotation for the lance sprite
+                    if (dx == 1) lanceRotation = 0f;
+                    else if (dx == -1) lanceRotation = 180f;
+                    else if (dy == 1) lanceRotation = 90f;
+                    else if (dy == -1) lanceRotation = 270f;
+                    
+                    // Start animation
+                    isLanceAnimating = true;
+                    lanceAnimTimer = 0.0f;
+                    showImpact = false;
+                    
+                    // Clear shooting message
+                    proximityMessages.clear();
+                    
+                    // Exit shooting mode
+                    isShootingMode = false; 
+                    
+                    return true;
+                }
+            }
+        }
+        
+        // Block movement if paused, game over, OR while animation is playing
+        if (currentState != STATE_GAMEPLAY || isLanceAnimating) {
             return false;
         }
         
@@ -297,7 +442,7 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
 
 
         // 2. PAUSE/MENU Button Logic (Active during gameplay or game over)
-        if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { // <-- MODIFIED CONDITION
+        if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { 
             // Check [MENU] button click area
             float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
             float btnY = viewY - MENU_BUTTON_HEIGHT - 10;
@@ -347,6 +492,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     }
     
     private void checkGameInteraction() {
+        // If we are waiting for a shot to resolve, don't update messages
+        if (isLanceAnimating) return; 
+
         proximityMessages.clear();
         
         if (currentState == STATE_GAME_OVER) return;
@@ -371,7 +519,8 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             }
         }
 
-        if (playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
+        // Check for Wumpus (Lose Condition) - ONLY if Wumpus is alive
+        if (isWumpusAlive && playerX == wumpus.getGridX() && playerY == wumpus.getGridY()) {
             currentState = STATE_GAME_OVER;
             gameOverMessage = "A ROAR! The Wumpus devoured you! Game Over! 😵";
             return;
@@ -382,7 +531,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         if (isAdjacent(playerX, playerY, gold.getGridX(), gold.getGridY())) {
             proximityMessages.add("A glow is visible");
         }
-        if (isAdjacent(playerX, playerY, wumpus.getGridX(), wumpus.getGridY())) {
+        
+        // Wumpus Proximity - ONLY if Wumpus is alive
+        if (isWumpusAlive && isAdjacent(playerX, playerY, wumpus.getGridX(), wumpus.getGridY())) { 
             proximityMessages.add("You can smell a stench");
         }
         for (StaticEntity trap : traps) {
@@ -419,6 +570,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
     
     @Override
     public void render() {
+        // 1. UPDATE GAME LOGIC
+        update(Gdx.graphics.getDeltaTime());
+        
         camera.update();
         Gdx.gl.glClearColor(0.1f, 0.1f, 0.2f, 1.0f);
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT);
@@ -472,7 +626,17 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                     if (isGameOver || isVisible[x][y]) {
                         batch.draw(pebbleTexture, xPos, yPos, TILE_SIZE, TILE_SIZE);
                         
-                        if (wumpus != null && x == wumpus.getGridX() && y == wumpus.getGridY()) wumpus.draw(batch, TILE_SIZE);
+                        // Draw Wumpus (or blood if dead)
+                        if (wumpus != null && x == wumpus.getGridX() && y == wumpus.getGridY()) {
+                            if (isWumpusAlive) {
+                                wumpus.draw(batch, TILE_SIZE);
+                            } else {
+                                // Draw blood if Wumpus is dead
+                                batch.draw(wumpusDeadTexture, xPos, yPos, TILE_SIZE, TILE_SIZE); 
+                            }
+                        }
+                        
+                        // Draw other entities
                         for (StaticEntity entity : treasure) {
                             if (x == entity.getGridX() && y == entity.getGridY()) entity.draw(batch, TILE_SIZE);
                         }
@@ -490,9 +654,48 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
             
             // 2. Draw Player
             player.draw(batch, TILE_SIZE);
+            
+            // 3. Draw Lance Animation
+            if (isLanceAnimating) {
+                float t = lanceAnimTimer / LANCE_ANIM_DURATION;
+                
+                // Interpolated value (from 0.0 to 1.0)
+                float startPixelX = lanceStartX * TILE_SIZE + (TILE_SIZE / 2f);
+                float startPixelY = lanceStartY * TILE_SIZE + (TILE_SIZE / 2f);
+                float endPixelX = lanceEndX * TILE_SIZE + (TILE_SIZE / 2f);
+                float endPixelY = lanceEndY * TILE_SIZE + (TILE_SIZE / 2f);
+                
+                // Calculate current interpolated position (center of tile to center of tile)
+                float currentPixelX = MathUtils.lerp(startPixelX, endPixelX, t);
+                float currentPixelY = MathUtils.lerp(startPixelY, endPixelY, t);
+                
+                // Draw Lance at interpolated position
+                batch.draw(
+                    lanceTexture, 
+                    currentPixelX - (TILE_SIZE / 2f), // x position (adjusted for sprite origin)
+                    currentPixelY - (TILE_SIZE / 2f), // y position (adjusted for sprite origin)
+                    TILE_SIZE / 2f,                   // origin X (center of sprite for rotation)
+                    TILE_SIZE / 2f,                   // origin Y
+                    TILE_SIZE,                        // width
+                    TILE_SIZE,                        // height
+                    1f, 1f,                           // scale X, Y
+                    lanceRotation,                    // rotation
+                    0, 0,                             // srcX, srcY
+                    lanceTexture.getWidth(),          // srcWidth
+                    lanceTexture.getHeight(),         // srcHeight
+                    false, false                      // flipX, flipY
+                );
+            }
+            
+            // 4. Draw Impact Graphic (briefly)
+            if (showImpact && impactTimer > 0) {
+                 float impactX = lanceEndX * TILE_SIZE;
+                 float impactY = lanceEndY * TILE_SIZE;
+                 batch.draw(impactTexture, impactX, impactY, TILE_SIZE, TILE_SIZE);
+            }
 
-            // 3. FOG OF WAR DRAWING
-            if (!isGameOver) {
+            // 5. FOG OF WAR DRAWING
+            if (!isGameOver && !isLanceAnimating) { // Hide FoW during the short animation
                 for (int x = 0; x < GRID_SIZE; x++) {
                     for (int y = 0; y < GRID_SIZE; y++) {
                         if (!isVisible[x][y]) {
@@ -504,10 +707,10 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
                 }
             }
 
-            // 4. UI DRAWING (HUD, Messages, Pause Menu)
+            // 6. UI DRAWING (HUD, Messages, Pause Menu)
 
             // Draw Menu Button (Upper Right)
-            if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { // <-- MODIFIED CONDITION
+            if (currentState == STATE_GAMEPLAY || currentState == STATE_GAME_OVER) { 
                 font.setColor(Color.WHITE);
                 float btnX = viewX + viewport.getWorldWidth() - MENU_BUTTON_WIDTH - 10;
                 float btnY = viewY - 10;
@@ -563,6 +766,9 @@ public class WumpusGame extends ApplicationAdapter implements InputProcessor {
         batch.dispose();
         font.dispose();
         fogOfWarTexture.dispose();
+        wumpusDeadTexture.dispose(); 
+        lanceTexture.dispose(); // DISPOSE LANCE TEXTURE
+        impactTexture.dispose(); // DISPOSE IMPACT TEXTURE
         
         // Dispose textures for all static entities (only if they were initialized)
         if (traps != null) for (StaticEntity entity : traps) entity.dispose();
